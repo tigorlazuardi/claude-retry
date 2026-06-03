@@ -26,8 +26,120 @@ export async function inject(
   text: string,
   execFileFn: ExecFileFn = defaultExecFile,
 ): Promise<void> {
+  // Ctrl+C first clears any half-typed input (does not quit Claude), then type + Enter.
+  await execFileFn('zellij', ['action', 'write', '--pane-id', String(paneId), '3']);
   await execFileFn('zellij', ['action', 'write-chars', '--pane-id', String(paneId), text]);
   await execFileFn('zellij', ['action', 'write', '--pane-id', String(paneId), '13']);
+}
+
+/**
+ * A single Claude pane to watch, addressable across zellij sessions.
+ * `label` is a stable human-readable key (session:paneId) used for state
+ * tracking and logs.
+ */
+export interface PaneTarget {
+  session: string;
+  paneId: string;
+  label: string;
+}
+
+interface RawPane {
+  id: number;
+  is_plugin: boolean;
+  exited: boolean;
+}
+
+/**
+ * List all live zellij session names, skipping EXITED/resurrectable ones and
+ * the daemon's own session (ZELLIJ_SESSION_NAME) so it never watches itself.
+ */
+export async function listSessions(
+  execFileFn: ExecFileFn = defaultExecFile,
+): Promise<string[]> {
+  const own = process.env['ZELLIJ_SESSION_NAME'];
+  const names: string[] = [];
+  const { stdout } = await execFileFn('zellij', ['list-sessions', '-n']);
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (/\(EXITED/.test(trimmed)) continue; // skip dead/resurrectable sessions
+    // Session names may contain spaces ("Rainbow Road"); the name is everything
+    // before the " [Created ...]" suffix that zellij appends.
+    const idx = trimmed.indexOf(' [');
+    const name = (idx >= 0 ? trimmed.slice(0, idx) : trimmed).trim();
+    if (!name) continue;
+    if (own && name === own) continue; // never watch our own session
+    names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Walk every live session and return every non-plugin, non-exited pane as a
+ * target. We do NOT try to identify which pane is Claude — pane titles and
+ * commands are unreliable (interactive `claude` reports the shell, titles are
+ * the cwd). Instead the monitor dumps each pane's screen and only acts on the
+ * ones actually showing a rate-limit banner. Works on detached sessions via
+ * the global `--session` flag; the daemon's own session is already excluded by
+ * listSessions, so its logs are never scanned.
+ */
+export async function listPaneTargets(
+  execFileFn: ExecFileFn = defaultExecFile,
+): Promise<PaneTarget[]> {
+  const sessions = await listSessions(execFileFn);
+  const targets: PaneTarget[] = [];
+  for (const session of sessions) {
+    let panes: RawPane[];
+    try {
+      const { stdout } = await execFileFn('zellij', [
+        '--session',
+        session,
+        'action',
+        'list-panes',
+        '-j',
+      ]);
+      panes = JSON.parse(stdout) as RawPane[];
+    } catch {
+      continue; // session vanished or output unparseable — skip this round
+    }
+    for (const p of panes) {
+      if (p.is_plugin || p.exited) continue;
+      targets.push({ session, paneId: String(p.id), label: `${session}:${p.id}` });
+    }
+  }
+  return targets;
+}
+
+/** Dump a target pane's visible screen across sessions. */
+export async function captureTarget(
+  t: PaneTarget,
+  execFileFn: ExecFileFn = defaultExecFile,
+): Promise<string> {
+  const { stdout } = await execFileFn('zellij', [
+    '--session',
+    t.session,
+    'action',
+    'dump-screen',
+    '--pane-id',
+    t.paneId,
+  ]);
+  return stdout;
+}
+
+/**
+ * Inject into a target pane across sessions: Ctrl+C to clear any half-typed
+ * input first, then type text + Enter. A single Ctrl+C in Claude Code only
+ * clears the input box (shows "Press Ctrl-C again to exit"), it does not quit.
+ */
+export async function injectTarget(
+  t: PaneTarget,
+  text: string,
+  execFileFn: ExecFileFn = defaultExecFile,
+): Promise<void> {
+  const base = ['--session', t.session, 'action'];
+  await execFileFn('zellij', [...base, 'write', '--pane-id', t.paneId, '3']); // Ctrl+C clears input
+  await execFileFn('zellij', [...base, 'write-chars', '--pane-id', t.paneId, text]);
+  await execFileFn('zellij', [...base, 'write', '--pane-id', t.paneId, '13']); // Enter
 }
 
 /** True when a list-clients RUNNING_COMMAND is the `claude` CLI itself.

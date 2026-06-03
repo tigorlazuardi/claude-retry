@@ -1,21 +1,28 @@
 #!/usr/bin/env node
-import { capturePane, inject, listClaudePanes } from './zellij.ts';
+import {
+  capturePane,
+  inject,
+  listPaneTargets,
+  captureTarget,
+  injectTarget,
+  type PaneTarget,
+} from './zellij.ts';
 import { runMonitor, runMultiMonitor } from './monitor.ts';
 
 const USAGE = `claude-retry — Auto-inject 'continue' when Claude hits a rate limit in zellij
 
 Usage:
-  claude-retry start               Watch ALL Claude panes (re-discovers each pass)
-  claude-retry monitor <pane-id>   Watch one specific zellij pane by ID
+  claude-retry start               Watch ALL Claude panes across ALL sessions
+  claude-retry monitor <pane-id>   Watch one pane by ID in the current session
   claude-retry help                Show this help
 
-Options:
-  CLAUDE_PANE_ID=<id>   Pin 'start' to a single pane instead of auto-discovery
+Run as a foreground daemon in any zellij pane (a dedicated session is ideal).
+'start' polls every 60s, walks every live zellij session and every pane, and
+auto-injects 'continue' after each Claude pane's rate-limit reset time. It works
+on detached sessions and skips its own session. New Claude panes are picked up
+automatically; closed ones are dropped. Logs go to stderr.
 
-Run as a foreground daemon in a dedicated zellij pane. 'start' polls every
-60s, finds every pane running the 'claude' CLI, and injects 'continue' after
-each one's rate-limit reset time. New Claude sessions are picked up
-automatically; closed panes are dropped. Logs go to stderr.`;
+'monitor <pane-id>' is the legacy single-pane mode (current session only).`;
 
 /** Timestamped stderr logger — chatty so the daemon shows clear signs of life. */
 function log(msg: string): void {
@@ -23,12 +30,24 @@ function log(msg: string): void {
   process.stderr.write(`[${ts}] ${msg}\n`);
 }
 
-const deps = {
+const now = () => Date.now();
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Single-pane (legacy 'monitor') deps — addressed by bare pane id.
+const singleDeps = {
   capture: (id: string) => capturePane(id),
   inject: (id: string, text: string) => inject(id, text),
-  now: () => Date.now(),
-  sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
-  listPanes: () => listClaudePanes(),
+  now,
+  sleep,
+};
+
+// Multi-session ('start') deps — addressed by PaneTarget across sessions.
+const multiDeps = {
+  listTargets: () => listPaneTargets(),
+  capture: (t: PaneTarget) => captureTarget(t),
+  inject: (t: PaneTarget, text: string) => injectTarget(t, text),
+  now,
+  sleep,
   log,
 };
 
@@ -44,13 +63,13 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       log(`monitoring single pane ${paneId} (poll 5s)`);
-      await runMonitor(paneId, deps);
+      await runMonitor(paneId, singleDeps);
       break;
     }
 
     case 'start': {
-      log('claude-retry daemon starting — discovering Claude panes (poll 60s)');
-      await runMultiMonitor(deps);
+      log('claude-retry daemon starting — walking all sessions/panes (poll 60s)');
+      await runMultiMonitor(multiDeps);
       break;
     }
 

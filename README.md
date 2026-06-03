@@ -1,6 +1,6 @@
 # claude-retry
 
-Watches every Claude CLI pane in a [zellij](https://zellij.dev/) terminal session. When a pane hits Anthropic's 5-hour usage limit, it detects the rate-limit message, waits until that pane's reset time, then injects `continue` to resume automatically. One daemon covers all your Claude sessions at once.
+Watches every pane across **all** your [zellij](https://zellij.dev/) sessions. When a pane hits Anthropic's usage/session limit, it detects the rate-limit banner, waits until that pane's reset time, then clears the input and injects `continue` to resume automatically. One daemon covers every session at once — even detached ones.
 
 ## Install
 
@@ -12,35 +12,31 @@ The package is scoped (`@tigorhutasuhut/claude-retry`); the installed command is
 
 ## Usage
 
-Must be run inside a zellij session. The recommended way to run claude-retry is as a foreground daemon in a dedicated zellij pane:
-
-1. In your main pane, run `claude` as normal.
-2. Open a second pane (e.g. `Ctrl+p` then `d` to split down).
-3. In the new pane, start the daemon:
+Run it as a foreground daemon, ideally in its **own dedicated zellij session** (the daemon skips its own session, so this keeps it from scanning itself):
 
 ```bash
+# in a session you keep around, e.g. "Claude Retry Monitor":
 claude-retry start
 ```
 
-`start` rediscovers Claude panes on **every pass** (every 60s) via `zellij action list-clients`. This means:
+`start` re-scans **every pass** (60s): it walks all live zellij sessions and every pane in them, dumps each pane's screen, and acts on the ones showing a rate-limit banner. This means:
 
-- You only ever need **one** daemon, no matter how many Claude sessions you run.
-- Open a new Claude session in a new pane → it's picked up automatically on the next pass. **No restart needed.**
-- Close a Claude pane → it's dropped from the watch list silently.
-- Each pane gets its own independent rate-limit state.
+- **One** daemon covers every session — projects, branches, all of them.
+- It works on **detached** sessions (uses zellij's global `--session` flag, not attached clients).
+- Open a brand-new Claude session anywhere → picked up on the next pass. **No restart needed.**
+- Close a pane → dropped from the watch list silently.
+- Each pane keeps its own independent rate-limit state.
 
-Leave it running — the pane *is* the daemon. zellij keeps it alive across detach/attach, so you don't need systemd or any external supervisor. Logs stream to stderr so you always see signs of life.
+Leave it running — the pane *is* the daemon. zellij keeps it alive across detach/attach, so you don't need systemd or any external supervisor. Chatty logs stream to stderr so you always see signs of life.
 
-> **Start Claude the right way for detection.** Launch the session with the plain `claude` command, then run the `/remote-control` slash command *inside* it. Do **not** use the `claude remote-control` CLI subcommand directly — that mode silences the on-screen text, so `dump-screen` captures nothing and the rate-limit message can't be detected. Running `claude` → `/remote-control` keeps the session "live" and visible to the monitor.
+> **Start Claude the right way for detection.** Launch the session with the plain `claude` command, then run the `/remote-control` slash command *inside* it. Do **not** use the `claude remote-control` CLI subcommand directly — that mode silences the on-screen text, so `dump-screen` captures nothing and the rate-limit banner can't be detected. Running `claude` → `/remote-control` keeps the session "live" and visible to the monitor.
 
-To pin the daemon to a single pane instead of auto-discovery:
+### Single-pane mode (legacy)
+
+To watch just one pane in the **current** session, by ID:
 
 ```bash
-# Watch one specific pane by ID:
 claude-retry monitor 3
-
-# Or restrict 'start' to one pane via env:
-CLAUDE_PANE_ID=3 claude-retry start
 ```
 
 ### Optional: shell wrapper
@@ -57,22 +53,16 @@ source (npm root -g)/claude-retry/shell/wrapper.fish
 source "$(npm root -g)/claude-retry/shell/wrapper.bash"
 ```
 
-## Configuration
-
-```bash
-CLAUDE_PANE_ID=3 claude-retry start   # pin to one pane, skip auto-discovery
-```
-
 ## How it works
 
 Every pass (60s for `start`, 5s for single-pane `monitor`):
 
-1. **Discover** — `start` lists Claude panes via `zellij action list-clients`, matching panes whose command is the `claude` CLI (the daemon's own `claude-retry` pane is excluded). New panes are added, closed panes are pruned.
-2. **Capture** — for each pane, grabs the screen with `zellij action dump-screen` (ANSI stripped).
-3. **Match** — checks the text against the rate-limit patterns.
-4. **Retry** — on detection, parses the reset time and marks the pane `waiting`; once the reset elapses, injects `continue` via `zellij action write-chars`.
+1. **Discover** — `zellij list-sessions` enumerates live sessions (EXITED ones and the daemon's own `$ZELLIJ_SESSION_NAME` are skipped). For each, `zellij --session <name> action list-panes -j` lists its panes; plugins and exited panes are dropped. New panes are added, gone ones pruned.
+2. **Capture** — each pane's visible screen is dumped with `zellij --session <name> action dump-screen --pane-id <id>` (ANSI stripped). This works on detached sessions, no attached client required.
+3. **Match** — the text is checked against the rate-limit patterns. Panes that aren't showing a limit banner are simply left alone — no pane-identification guesswork needed.
+4. **Retry** — on detection, the reset time is parsed and the pane is marked `waiting`. Once the reset elapses, the daemon sends **Ctrl+C** (clears any half-typed input — a single Ctrl+C in Claude Code doesn't quit), then types `continue` and Enter via `write-chars` / `write`.
 
-Per-pane state persists across passes, so a pane mid-wait isn't disturbed by rediscovery. It runs as a plain foreground process inside the same zellij session as Claude — no transparent session wrapping, no external daemon. The zellij pane is the daemon.
+Per-pane state (keyed by `session:paneId`) persists across passes, so a pane mid-wait isn't disturbed by rediscovery. It runs as a plain foreground process — no transparent session wrapping, no external daemon. The zellij pane is the daemon.
 
 ## Requirements
 

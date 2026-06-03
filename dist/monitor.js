@@ -3,14 +3,18 @@ import { parseResetTime, calculateWaitMs } from "./time-parser.js";
 export function createState() {
     return { status: 'monitoring', waitUntil: 0 };
 }
-export async function tick(paneId, state, deps, marginSeconds, fallbackHours) {
-    const screenText = await deps.capture(paneId);
+/**
+ * Core state transition for one pane, given its current screen text.
+ * `injectContinue` is called only when a wait period has elapsed. Shared by
+ * single-pane (tick) and multi-session (tickTarget) monitoring.
+ */
+async function stepState(state, screenText, now, injectContinue, marginSeconds, fallbackHours) {
     if (state.status === 'waiting') {
-        if (deps.now() < state.waitUntil) {
+        if (now < state.waitUntil) {
             return 'rate-limited';
         }
         // Wait period elapsed — inject continue
-        await deps.inject(paneId, 'continue');
+        await injectContinue();
         state.status = 'monitoring';
         state.waitUntil = 0;
         return 'retried';
@@ -20,12 +24,20 @@ export async function tick(paneId, state, deps, marginSeconds, fallbackHours) {
     if (result.limited) {
         const resetLine = result.resetLine ?? '';
         const parsed = parseResetTime(resetLine);
-        const waitMs = calculateWaitMs(parsed, marginSeconds, fallbackHours, new Date(deps.now()));
-        state.waitUntil = deps.now() + waitMs;
+        const waitMs = calculateWaitMs(parsed, marginSeconds, fallbackHours, new Date(now));
+        state.waitUntil = now + waitMs;
         state.status = 'waiting';
         return 'rate-limited';
     }
     return 'monitoring';
+}
+export async function tick(paneId, state, deps, marginSeconds, fallbackHours) {
+    const screenText = await deps.capture(paneId);
+    return stepState(state, screenText, deps.now(), () => deps.inject(paneId, 'continue'), marginSeconds, fallbackHours);
+}
+async function tickTarget(target, state, deps, marginSeconds, fallbackHours) {
+    const screenText = await deps.capture(target);
+    return stepState(state, screenText, deps.now(), () => deps.inject(target, 'continue'), marginSeconds, fallbackHours);
 }
 export async function runMonitor(paneId, deps, pollIntervalMs, marginSeconds, fallbackHours) {
     const state = createState();
@@ -35,66 +47,67 @@ export async function runMonitor(paneId, deps, pollIntervalMs, marginSeconds, fa
     }
 }
 /**
- * One discovery+monitor pass over every live Claude pane.
+ * One discovery+monitor pass over every Claude pane in every live session.
  *
- * Re-discovers panes each call so new Claude sessions are picked up and
- * closed panes are pruned. Per-pane state lives in `states`, keyed by pane ID,
- * and persists across calls. A failed discovery or a single pane's
- * capture/inject error is swallowed so one bad pane never stops the others.
+ * Re-discovers targets each call so new Claude sessions/panes are picked up and
+ * closed ones are pruned. Per-pane state lives in `states`, keyed by the
+ * target's label (session:paneId), and persists across calls. A failed
+ * discovery or a single pane's capture/inject error is swallowed so one bad
+ * pane never stops the others.
  */
 export async function multiTick(states, deps, marginSeconds, fallbackHours) {
     const log = deps.log ?? (() => { });
-    let panes;
+    let targets;
     try {
-        panes = await deps.listPanes();
+        targets = await deps.listTargets();
     }
     catch {
         // Discovery failed this round — keep existing states, retry next tick.
-        log('scan failed: could not list panes (will retry)');
+        log('scan failed: could not list sessions/panes (will retry)');
         return;
     }
     // Prune state for panes that no longer exist.
-    const live = new Set(panes);
-    for (const id of [...states.keys()]) {
-        if (!live.has(id)) {
-            states.delete(id);
-            log(`pane ${id} gone — dropped from watch`);
+    const live = new Set(targets.map((t) => t.label));
+    for (const key of [...states.keys()]) {
+        if (!live.has(key)) {
+            states.delete(key);
+            log(`${key} gone — dropped from watch`);
         }
     }
-    log(panes.length === 0
+    log(targets.length === 0
         ? 'scan: no Claude panes found'
-        : `scan: watching ${panes.length} Claude pane(s) [${panes.join(', ')}]`);
-    for (const id of panes) {
-        let state = states.get(id);
+        : `scan: watching ${targets.length} Claude pane(s) [${targets.map((t) => t.label).join(', ')}]`);
+    for (const target of targets) {
+        let state = states.get(target.label);
         if (!state) {
             state = createState();
-            states.set(id, state);
-            log(`pane ${id} — new Claude session, now watching`);
+            states.set(target.label, state);
+            log(`${target.label} — new Claude pane, now watching`);
         }
         const before = state.status;
         try {
-            const status = await tick(id, state, deps, marginSeconds, fallbackHours);
-            logPaneStatus(log, id, before, state, status);
+            const status = await tickTarget(target, state, deps, marginSeconds, fallbackHours);
+            logPaneStatus(log, target.label, before, state, status);
         }
         catch {
             // This pane's capture/inject failed — leave its state, keep going.
-            log(`pane ${id} — capture/inject error (skipped this round)`);
+            log(`${target.label} — capture/inject error (skipped this round)`);
         }
     }
 }
-function logPaneStatus(log, id, before, state, status) {
+function logPaneStatus(log, label, before, state, status) {
     if (status === 'rate-limited' && before === 'monitoring') {
         const until = new Date(state.waitUntil).toISOString();
-        log(`pane ${id} — RATE LIMITED, waiting until ${until}`);
+        log(`${label} — RATE LIMITED, waiting until ${until}`);
     }
     else if (status === 'rate-limited') {
-        log(`pane ${id} — still waiting for reset`);
+        log(`${label} — still waiting for reset`);
     }
     else if (status === 'retried') {
-        log(`pane ${id} — reset reached, injected 'continue'`);
+        log(`${label} — reset reached, cleared input + injected 'continue'`);
     }
     else {
-        log(`pane ${id} — ok`);
+        log(`${label} — ok`);
     }
 }
 export async function runMultiMonitor(deps, pollIntervalMs, marginSeconds, fallbackHours) {

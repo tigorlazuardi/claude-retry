@@ -5,6 +5,10 @@ import {
   inject,
   resolvePaneId,
   listClaudePanes,
+  listSessions,
+  listPaneTargets,
+  captureTarget,
+  injectTarget,
   type ExecFileFn,
 } from '../src/zellij.ts';
 
@@ -32,14 +36,99 @@ test('capturePane calls dump-screen with correct args and returns stdout', async
   assert.deepEqual(calls[0]!.args, ['action', 'dump-screen', '--pane-id', '0']);
 });
 
-test('inject calls write-chars then write with correct args', async () => {
-  const { fn, calls } = makeFakeExecFile([{ stdout: '' }, { stdout: '' }]);
+test('inject sends Ctrl+C, then write-chars, then Enter', async () => {
+  const { fn, calls } = makeFakeExecFile([{ stdout: '' }, { stdout: '' }, { stdout: '' }]);
   await inject('3', 'continue', fn);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0]!.cmd, 'zellij');
-  assert.deepEqual(calls[0]!.args, ['action', 'write-chars', '--pane-id', '3', 'continue']);
-  assert.equal(calls[1]!.cmd, 'zellij');
-  assert.deepEqual(calls[1]!.args, ['action', 'write', '--pane-id', '3', '13']);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0]!.args, ['action', 'write', '--pane-id', '3', '3']); // Ctrl+C
+  assert.deepEqual(calls[1]!.args, ['action', 'write-chars', '--pane-id', '3', 'continue']);
+  assert.deepEqual(calls[2]!.args, ['action', 'write', '--pane-id', '3', '13']); // Enter
+});
+
+const TARGET = { session: 'projA', paneId: '2', label: 'projA:2' };
+
+test('listSessions parses names, skips EXITED and own session', async () => {
+  const original = process.env['ZELLIJ_SESSION_NAME'];
+  process.env['ZELLIJ_SESSION_NAME'] = 'Claude Retry Monitor';
+  try {
+    const out =
+      'projA [Created 1h ago] \n' +
+      'projB [Created 2m ago] \n' +
+      'old-one [Created 3h ago] (EXITED - attach to resurrect)\n' +
+      'Claude Retry Monitor [Created 5m ago] (current)\n';
+    const { fn, calls } = makeFakeExecFile([{ stdout: out }]);
+    const result = await listSessions(fn);
+    assert.deepEqual(result, ['projA', 'projB']);
+    assert.deepEqual(calls[0]!.args, ['list-sessions', '-n']);
+  } finally {
+    if (original === undefined) delete process.env['ZELLIJ_SESSION_NAME'];
+    else process.env['ZELLIJ_SESSION_NAME'] = original;
+  }
+});
+
+test('listPaneTargets walks sessions, includes all non-plugin live panes', async () => {
+  const original = process.env['ZELLIJ_SESSION_NAME'];
+  delete process.env['ZELLIJ_SESSION_NAME'];
+  try {
+    const sessionsOut = 'projA [Created 1h ago] \nprojB [Created 2m ago] \n';
+    const panesA = JSON.stringify([
+      { id: 0, is_plugin: true, exited: false }, // plugin → excluded
+      { id: 1, is_plugin: false, exited: false }, // ✓
+      { id: 2, is_plugin: false, exited: false }, // ✓
+    ]);
+    const panesB = JSON.stringify([
+      { id: 0, is_plugin: false, exited: false }, // ✓
+      { id: 1, is_plugin: false, exited: true }, // exited → excluded
+    ]);
+    const { fn, calls } = makeFakeExecFile([
+      { stdout: sessionsOut },
+      { stdout: panesA },
+      { stdout: panesB },
+    ]);
+    const result = await listPaneTargets(fn);
+    assert.deepEqual(result, [
+      { session: 'projA', paneId: '1', label: 'projA:1' },
+      { session: 'projA', paneId: '2', label: 'projA:2' },
+      { session: 'projB', paneId: '0', label: 'projB:0' },
+    ]);
+    assert.deepEqual(calls[1]!.args, ['--session', 'projA', 'action', 'list-panes', '-j']);
+  } finally {
+    if (original !== undefined) process.env['ZELLIJ_SESSION_NAME'] = original;
+  }
+});
+
+test('listPaneTargets skips a session whose list-panes fails', async () => {
+  const original = process.env['ZELLIJ_SESSION_NAME'];
+  delete process.env['ZELLIJ_SESSION_NAME'];
+  try {
+    const sessionsOut = 'projA [Created 1h ago] \nprojB [Created 2m ago] \n';
+    const panesB = JSON.stringify([{ id: 0, is_plugin: false, exited: false }]);
+    const { fn } = makeFakeExecFile([
+      { stdout: sessionsOut },
+      new Error('session gone'), // projA fails
+      { stdout: panesB },
+    ]);
+    const result = await listPaneTargets(fn);
+    assert.deepEqual(result, [{ session: 'projB', paneId: '0', label: 'projB:0' }]);
+  } finally {
+    if (original !== undefined) process.env['ZELLIJ_SESSION_NAME'] = original;
+  }
+});
+
+test('captureTarget dumps the target session/pane', async () => {
+  const { fn, calls } = makeFakeExecFile([{ stdout: 'screen text' }]);
+  const result = await captureTarget(TARGET, fn);
+  assert.equal(result, 'screen text');
+  assert.deepEqual(calls[0]!.args, ['--session', 'projA', 'action', 'dump-screen', '--pane-id', '2']);
+});
+
+test('injectTarget sends Ctrl+C, text, Enter to the target session/pane', async () => {
+  const { fn, calls } = makeFakeExecFile([{ stdout: '' }, { stdout: '' }, { stdout: '' }]);
+  await injectTarget(TARGET, 'continue', fn);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0]!.args, ['--session', 'projA', 'action', 'write', '--pane-id', '2', '3']);
+  assert.deepEqual(calls[1]!.args, ['--session', 'projA', 'action', 'write-chars', '--pane-id', '2', 'continue']);
+  assert.deepEqual(calls[2]!.args, ['--session', 'projA', 'action', 'write', '--pane-id', '2', '13']);
 });
 
 test('resolvePaneId returns CLAUDE_PANE_ID env var without calling execFile', async () => {
