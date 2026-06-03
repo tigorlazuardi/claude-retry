@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "Monitor Claude CLI in a zellij pane, auto-inject continue on rate-limit",
   "type": "module",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "shell/"
+  ],
   "bin": {
     "claude-retry": "dist/cli.js"
   },
