@@ -1,6 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createState, tick, type MonitorDeps } from '../src/monitor.ts';
+import {
+  createState,
+  tick,
+  multiTick,
+  type MonitorDeps,
+  type MultiMonitorDeps,
+  type PaneStates,
+} from '../src/monitor.ts';
 
 const FIXED_NOW = new Date('2024-01-15T10:00:00Z').getTime();
 
@@ -98,5 +105,118 @@ describe('tick', () => {
     const deps2 = { ...deps, capture: async (_: string) => 'Claude is ready to help.' };
     const s4 = await tick('pane-1', state, deps2 as MonitorDeps);
     assert.equal(s4, 'monitoring');
+  });
+});
+
+function makeMultiDeps(opts: {
+  panes: string[] | (() => string[]);
+  screens?: Record<string, string>;
+  now?: () => number;
+}): MultiMonitorDeps & { injected: Array<[string, string]> } {
+  const injected: Array<[string, string]> = [];
+  return {
+    listPanes: async () =>
+      typeof opts.panes === 'function' ? opts.panes() : opts.panes,
+    capture: async (id: string) => opts.screens?.[id] ?? '',
+    inject: async (id: string, text: string) => {
+      injected.push([id, text]);
+    },
+    now: opts.now ?? (() => FIXED_NOW),
+    sleep: async () => {},
+    injected,
+  };
+}
+
+describe('multiTick', () => {
+  it('creates state for each discovered pane and detects limits independently', async () => {
+    const states: PaneStates = new Map();
+    const deps = makeMultiDeps({
+      panes: ['1', '2'],
+      screens: {
+        '1': 'Claude is ready.',
+        '2': '5-hour limit reached\nresets 3pm (UTC)',
+      },
+    });
+    await multiTick(states, deps);
+    assert.equal(states.get('1')!.status, 'monitoring');
+    assert.equal(states.get('2')!.status, 'waiting');
+    assert.ok(states.get('2')!.waitUntil > FIXED_NOW);
+    assert.equal(deps.injected.length, 0);
+  });
+
+  it('prunes state when a pane disappears', async () => {
+    const states: PaneStates = new Map();
+    states.set('9', createState());
+    states.get('9')!.status = 'waiting';
+    const deps = makeMultiDeps({ panes: ['1'], screens: { '1': 'ready' } });
+    await multiTick(states, deps);
+    assert.equal(states.has('9'), false);
+    assert.equal(states.has('1'), true);
+  });
+
+  it('picks up a newly appeared Claude pane on a later pass', async () => {
+    const states: PaneStates = new Map();
+    let panes = ['1'];
+    const deps = makeMultiDeps({ panes: () => panes, screens: { '1': 'ready', '2': 'ready' } });
+    await multiTick(states, deps);
+    assert.deepEqual([...states.keys()], ['1']);
+    panes = ['1', '2'];
+    await multiTick(states, deps);
+    assert.deepEqual([...states.keys()].sort(), ['1', '2']);
+  });
+
+  it('preserves per-pane waiting state across passes and injects when reset elapses', async () => {
+    const states: PaneStates = new Map();
+    let now = FIXED_NOW;
+    const deps = makeMultiDeps({
+      panes: ['7'],
+      screens: { '7': '5-hour limit reached\nresets 3pm (UTC)' },
+      now: () => now,
+    });
+    // Pass 1: detect → waiting
+    await multiTick(states, deps);
+    assert.equal(states.get('7')!.status, 'waiting');
+    const waitUntil = states.get('7')!.waitUntil;
+    assert.equal(deps.injected.length, 0);
+    // Pass 2: still before reset → no inject
+    now = waitUntil - 1000;
+    await multiTick(states, deps);
+    assert.equal(deps.injected.length, 0);
+    // Pass 3: after reset → inject continue
+    now = waitUntil + 1;
+    await multiTick(states, deps);
+    assert.deepEqual(deps.injected, [['7', 'continue']]);
+    assert.equal(states.get('7')!.status, 'monitoring');
+  });
+
+  it('swallows listPanes failure and keeps existing state', async () => {
+    const states: PaneStates = new Map();
+    states.set('1', createState());
+    states.get('1')!.status = 'waiting';
+    const deps: MultiMonitorDeps = {
+      listPanes: async () => {
+        throw new Error('zellij gone');
+      },
+      capture: async () => '',
+      inject: async () => {},
+      now: () => FIXED_NOW,
+      sleep: async () => {},
+    };
+    await multiTick(states, deps);
+    assert.equal(states.get('1')!.status, 'waiting');
+  });
+
+  it('continues to other panes when one pane capture throws', async () => {
+    const states: PaneStates = new Map();
+    const deps: MultiMonitorDeps & { injected: Array<[string, string]> } = {
+      ...makeMultiDeps({ panes: ['1', '2'] }),
+      capture: async (id: string) => {
+        if (id === '1') throw new Error('capture fail');
+        return '5-hour limit reached\nresets 3pm (UTC)';
+      },
+    } as MultiMonitorDeps & { injected: Array<[string, string]> };
+    await multiTick(states, deps);
+    // pane 2 still processed despite pane 1 throwing
+    assert.equal(states.get('2')!.status, 'waiting');
   });
 });

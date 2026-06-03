@@ -30,6 +30,46 @@ export async function inject(
   await execFileFn('zellij', ['action', 'write', '--pane-id', String(paneId), '13']);
 }
 
+/** True when a list-clients RUNNING_COMMAND is the `claude` CLI itself.
+ *  Excludes `claude-retry` (the monitor's own pane) and other claude-* tools. */
+function paneCommandIsClaude(runningCommand: string): boolean {
+  const first = runningCommand.trim().split(/\s+/)[0] ?? '';
+  const base = first.split('/').pop() ?? '';
+  return base === 'claude';
+}
+
+/**
+ * Discover every live Claude pane (deduped pane IDs).
+ *
+ * Honors CLAUDE_PANE_ID as an explicit single-pane override. Otherwise parses
+ * `zellij action list-clients` and returns every pane whose RUNNING_COMMAND is
+ * the `claude` CLI. Returns [] on failure so the caller can retry next tick.
+ */
+export async function listClaudePanes(
+  execFileFn: ExecFileFn = defaultExecFile,
+): Promise<string[]> {
+  const envId = process.env['CLAUDE_PANE_ID'];
+  if (envId) return [envId];
+
+  const ids = new Set<string>();
+  try {
+    const { stdout } = await execFileFn('zellij', ['action', 'list-clients']);
+    for (const line of stdout.split('\n').slice(1)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split(/\s+/);
+      const paneId = parts[1];
+      const runningCommand = parts.slice(2).join(' ');
+      if (paneId !== undefined && paneCommandIsClaude(runningCommand)) {
+        ids.add(paneId);
+      }
+    }
+  } catch {
+    // list-clients failed — return what we have; next tick retries.
+  }
+  return [...ids];
+}
+
 export async function resolvePaneId(execFileFn: ExecFileFn = defaultExecFile): Promise<string> {
   // 1. Explicit env var
   const envId = process.env['CLAUDE_PANE_ID'];

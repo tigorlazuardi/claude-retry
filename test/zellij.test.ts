@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { capturePane, inject, resolvePaneId, type ExecFileFn } from '../src/zellij.ts';
+import {
+  capturePane,
+  inject,
+  resolvePaneId,
+  listClaudePanes,
+  type ExecFileFn,
+} from '../src/zellij.ts';
 
 // Helper to build a fake execFileFn that records calls and returns preset results
 function makeFakeExecFile(
@@ -94,6 +100,53 @@ test('resolvePaneId falls back to list-panes when list-clients has no claude row
     if (original !== undefined) {
       process.env['CLAUDE_PANE_ID'] = original;
     }
+  }
+});
+
+test('listClaudePanes returns [CLAUDE_PANE_ID] without calling execFile', async () => {
+  const original = process.env['CLAUDE_PANE_ID'];
+  process.env['CLAUDE_PANE_ID'] = '7';
+  try {
+    const { fn, calls } = makeFakeExecFile([]);
+    const result = await listClaudePanes(fn);
+    assert.deepEqual(result, ['7']);
+    assert.equal(calls.length, 0);
+  } finally {
+    if (original === undefined) delete process.env['CLAUDE_PANE_ID'];
+    else process.env['CLAUDE_PANE_ID'] = original;
+  }
+});
+
+test('listClaudePanes returns all claude panes, deduped, excluding claude-retry', async () => {
+  const original = process.env['CLAUDE_PANE_ID'];
+  delete process.env['CLAUDE_PANE_ID'];
+  try {
+    const clientsOutput =
+      'CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n' +
+      '1 42 claude --dangerously-skip-permissions\n' +
+      '2 43 claude\n' +
+      '3 43 claude\n' + // duplicate pane id (two clients) → deduped
+      '4 50 claude-retry start\n' + // monitor's own pane → excluded
+      '5 51 bash\n';
+    const { fn, calls } = makeFakeExecFile([{ stdout: clientsOutput }]);
+    const result = await listClaudePanes(fn);
+    assert.deepEqual(result, ['42', '43']);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0]!.args, ['action', 'list-clients']);
+  } finally {
+    if (original !== undefined) process.env['CLAUDE_PANE_ID'] = original;
+  }
+});
+
+test('listClaudePanes returns [] when list-clients fails', async () => {
+  const original = process.env['CLAUDE_PANE_ID'];
+  delete process.env['CLAUDE_PANE_ID'];
+  try {
+    const { fn } = makeFakeExecFile([new Error('zellij not running')]);
+    const result = await listClaudePanes(fn);
+    assert.deepEqual(result, []);
+  } finally {
+    if (original !== undefined) process.env['CLAUDE_PANE_ID'] = original;
   }
 });
 

@@ -1,7 +1,7 @@
 # RESUME: claude-auto-retry (zellij edition)
 
 **Slice:** plans/claude-auto-retry-zellij/001-zellij-auto-retry/
-**Status:** active
+**Status:** complete
 **Branch:** ralph/claude-auto-retry-zellij-001
 **Last updated:** 2026-06-03 (Opus, initial)
 
@@ -16,15 +16,15 @@
 
 ## Task progress (with attempt counters)
 - [x] 001 spike (zellij capture+inject+pane-id + ADR) — attempts: 1 — DONE 2026-06-03
-- [ ] 002 scaffold — attempts: 0
-- [ ] 003 patterns.ts + test — attempts: 0
-- [ ] 004 time-parser.ts + test — attempts: 0
-- [ ] 005 zellij.ts + test — attempts: 0
-- [ ] 006 monitor.ts + test — attempts: 0
-- [ ] 007 cli.ts + launcher.ts — attempts: 0
-- [ ] 008 shell wrappers — attempts: 0
-- [ ] 009 packaging — attempts: 0
-- [ ] 010 README + final gate — attempts: 0
+- [x] 002 scaffold — attempts: 1 — DONE 2026-06-03
+- [x] 003 patterns.ts + test — attempts: 1 — DONE 2026-06-03
+- [x] 004 time-parser.ts + test — attempts: 1 — DONE 2026-06-03
+- [x] 005 zellij.ts + test — attempts: 1 — DONE 2026-06-03
+- [x] 006 monitor.ts + test — attempts: 1 — DONE 2026-06-03
+- [x] 007 cli.ts + launcher.ts — attempts: 1 — DONE 2026-06-03
+- [x] 008 shell wrappers — attempts: 1 — DONE 2026-06-03
+- [x] 009 packaging — attempts: 1 — DONE 2026-06-03
+- [x] 010 README + final gate — attempts: 1 — DONE 2026-06-03
 
 ## Decisions log
 - ADR-001 written: dump-screen (no --ansi) for capture; write-chars + write 13 for inject; list-clients RUNNING_COMMAND for pane-id auto-detect; hard abort if unresolvable (no focused-pane fallback). Opus-reviewed + approved after fixes.
