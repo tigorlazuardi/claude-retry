@@ -90,21 +90,28 @@ npm run verify      # typecheck + test + build (the publish gate)
 
 ## Publishing
 
-Releases are published to npm by GitHub Actions ([.github/workflows/publish.yml](.github/workflows/publish.yml)) when a GitHub Release is published, with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) enabled.
+Releases are published to npm by GitHub Actions ([.github/workflows/publish.yml](.github/workflows/publish.yml)) when a GitHub Release is published. Auth uses npm [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) — **no `NPM_TOKEN` secret** — and [provenance](https://docs.npmjs.com/generating-provenance-statements) is attached automatically.
 
-One-time setup: add an npm [automation token](https://docs.npmjs.com/creating-and-viewing-access-tokens) as the repo secret `NPM_TOKEN`.
+### One-time setup
 
-To cut a release:
+1. **Bootstrap the package** (trusted publishing can only be configured on a package that already exists). Publish `0.1.0` once from your machine:
+   ```bash
+   npm login
+   npm run verify
+   npm publish
+   ```
+2. **Configure the trusted publisher** on npmjs.com: open the package → **Settings → Trusted Publisher → GitHub Actions**, and set:
+   - Organization or user: `tigorlazuardi`
+   - Repository: `claude-retry`
+   - Workflow filename: `publish.yml`
+3. (Recommended) In package **Settings**, set publishing access to **require two-factor or trusted publisher**, which disables token publishes entirely.
+
+### Cutting a release
 
 ```bash
-npm version patch        # bump version + git tag
+npm version patch        # bump version + create git tag
 git push --follow-tags
 gh release create vX.Y.Z --generate-notes
 ```
 
-The workflow runs `npm ci` then `npm publish`; `prepublishOnly` (`npm run verify`) gates the publish on a clean typecheck, test, and build. To publish manually instead:
-
-```bash
-npm run verify
-npm publish              # uses publishConfig.access=public
-```
+Publishing the GitHub Release triggers the workflow, which runs `npm ci` then `npm publish`. `prepublishOnly` (`npm run verify`) gates the publish on a clean typecheck, test, and build.
