@@ -15,7 +15,7 @@
 - Original reference: github.com/cheapestinference/claude-auto-retry (tmux, Node, zero-dep).
 
 ## Task progress (with attempt counters)
-- [ ] 001 spike (zellij capture+inject+pane-id + ADR) — attempts: 0
+- [x] 001 spike (zellij capture+inject+pane-id + ADR) — attempts: 1 — DONE 2026-06-03
 - [ ] 002 scaffold — attempts: 0
 - [ ] 003 patterns.ts + test — attempts: 0
 - [ ] 004 time-parser.ts + test — attempts: 0
@@ -27,7 +27,7 @@
 - [ ] 010 README + final gate — attempts: 0
 
 ## Decisions log
-- (none yet — ADR-001 lands in task 001)
+- ADR-001 written: dump-screen (no --ansi) for capture; write-chars + write 13 for inject; list-clients RUNNING_COMMAND for pane-id auto-detect; hard abort if unresolvable (no focused-pane fallback). Opus-reviewed + approved after fixes.
 
 ## Open questions
 - (none — resolve via Opus escalation, do NOT silently expand scope)

@@ -1,0 +1,17 @@
+{
+  "name": "claude-retry",
+  "version": "0.1.0",
+  "description": "Monitor Claude CLI in a zellij pane, auto-inject continue on rate-limit",
+  "type": "module",
+  "bin": {
+    "claude-retry": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'test/**/*.test.ts'"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
