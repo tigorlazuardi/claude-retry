@@ -5,8 +5,10 @@ Watches every Claude CLI pane in a [zellij](https://zellij.dev/) terminal sessio
 ## Install
 
 ```bash
-npm install -g claude-retry
+npm install -g @tigorhutasuhut/claude-retry
 ```
+
+The package is scoped (`@tigorhutasuhut/claude-retry`); the installed command is still `claude-retry`.
 
 ## Usage
 

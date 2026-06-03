@@ -23,8 +23,9 @@ jobs:
           node-version: 24.x
           registry-url: https://registry.npmjs.org
           cache: npm
-      # Trusted publishing needs npm >= 11.5.1.
-      - run: npm install -g npm@latest
+      # Trusted publishing needs npm >= 11.5.1. Pin deliberately (this step runs
+      # with id-token: write, so an unpinned 'latest' is a supply-chain risk).
+      - run: npm install -g npm@11.5.1
       - run: npm ci
       # prepublishOnly runs typecheck + test + build before packing.
       - run: npm publish
