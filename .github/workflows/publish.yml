@@ -1,0 +1,26 @@
+name: Publish to npm
+
+# Publishes to npm when a GitHub Release is published.
+# Requires repo secret NPM_TOKEN (npm automation token).
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      # prepublishOnly runs typecheck + test + build before the tarball is packed.
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -3,6 +3,27 @@
   "version": "0.1.0",
   "description": "Monitor Claude CLI in a zellij pane, auto-inject continue on rate-limit",
   "type": "module",
+  "license": "MIT",
+  "author": "Tigor Hutasuhut <tigor.hutasuhut@gmail.com>",
+  "homepage": "https://github.com/tigorlazuardi/claude-retry#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tigorlazuardi/claude-retry.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tigorlazuardi/claude-retry/issues"
+  },
+  "keywords": [
+    "claude",
+    "zellij",
+    "rate-limit",
+    "cli",
+    "anthropic",
+    "automation"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
@@ -11,10 +32,16 @@
   "bin": {
     "claude-retry": "dist/cli.js"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --test 'test/**/*.test.ts'"
+    "test": "node --test 'test/**/*.test.ts'",
+    "verify": "npm run typecheck && npm test && npm run build",
+    "prepublishOnly": "npm run verify"
   },
   "devDependencies": {
     "@types/node": "25.9.1",
