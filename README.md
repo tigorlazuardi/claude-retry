@@ -100,8 +100,9 @@ Releases are published to npm by GitHub Actions ([.github/workflows/publish.yml]
    ```bash
    npm login
    npm run verify
-   npm publish
+   npm publish --provenance=false
    ```
+   `--provenance=false` is required for this local bootstrap: provenance is only generated in CI via OIDC (`publishConfig.provenance` stays `true` for the Actions publish). Without the flag, a local publish fails with `Automatic provenance generation not supported for provider: null`.
 2. **Configure the trusted publisher** on npmjs.com: open the package → **Settings → Trusted Publisher → GitHub Actions**, and set:
    - Organization or user: `tigorlazuardi`
    - Repository: `claude-retry`
