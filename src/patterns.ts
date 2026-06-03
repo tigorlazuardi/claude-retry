@@ -14,6 +14,7 @@ export function stripAnsi(text: string): string {
 const LIMIT_PATTERNS: RegExp[] = [
   /claude\.ai\/settings/i,
   /usage limit/i,
+  /session limit/i,
   /rate.?limit/i,
   /\blimit\b.*\breached\b/i,
   /\breached\b.*\blimit\b/i,

@@ -12,6 +12,7 @@ export function stripAnsi(text) {
 const LIMIT_PATTERNS = [
     /claude\.ai\/settings/i,
     /usage limit/i,
+    /session limit/i,
     /rate.?limit/i,
     /\blimit\b.*\breached\b/i,
     /\breached\b.*\blimit\b/i,

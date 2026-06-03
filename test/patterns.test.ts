@@ -78,6 +78,18 @@ test('match: "usage limit" + nearby "resets at 5:00 PM"', () => {
   assert.ok(result.resetLine !== null);
 });
 
+// --- match: real Claude Code "session limit" banner ---
+
+test('match: "session limit" banner with same-line reset + IANA tz', () => {
+  const text =
+    "You've hit your session limit · resets 12:50am (Asia/Jakarta)\n" +
+    '/upgrade to increase your usage limit.';
+  const result = match(text);
+  assert.equal(result.limited, true);
+  assert.match(result.resetLine ?? '', /session limit/i);
+  assert.match(result.resetLine ?? '', /resets 12:50am/i);
+});
+
 // --- match: "rate limit" + "try again in 2 hours" ---
 
 test('match: "rate limit" + "try again in 2 hours"', () => {
