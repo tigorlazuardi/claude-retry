@@ -198,12 +198,12 @@ export async function tick(
 async function tickTarget(
   target: PaneTarget,
   state: MonitorState,
+  screenText: string,
   deps: MultiMonitorDeps,
   marginSeconds?: number,
   fallbackHours?: number,
   snapshot?: AccountSnapshot,
 ): Promise<MonitorStatus> {
-  const screenText = await deps.capture(target);
   return stepState(
     state,
     screenText,
@@ -262,16 +262,6 @@ export async function multiTick(
     return;
   }
 
-  // Fetch account snapshot once per pass (swallow errors → undefined).
-  let snapshot: AccountSnapshot | undefined;
-  if (deps.getAccountSnapshot !== undefined) {
-    try {
-      snapshot = await deps.getAccountSnapshot();
-    } catch {
-      snapshot = undefined;
-    }
-  }
-
   // Prune state for panes that no longer exist, using miss counter to tolerate
   // transient list-panes failures.
   const live = new Set(targets.map((t) => t.label));
@@ -294,7 +284,39 @@ export async function multiTick(
       : `scan: watching ${targets.length} Claude pane(s) [${targets.map((t) => t.label).join(', ')}]`,
   );
 
+  // Capture each target's screen once, collecting successes into a map.
+  // Capture failures are logged and that pane is skipped this round.
+  const screens = new Map<string, string>();
   for (const target of targets) {
+    try {
+      screens.set(target.label, await deps.capture(target));
+    } catch {
+      log(`${target.label} — capture error (skipped this round)`);
+    }
+  }
+
+  // Decide whether usage API is needed this pass:
+  // - any pane already in 'waiting' state (among current targets), OR
+  // - any captured screen has a limit banner.
+  const anyWaiting = targets.some((t) => states.get(t.label)?.status === 'waiting');
+  const anyBanner = [...screens.values()].some((s) => match(s).limited);
+  const needUsage = anyWaiting || anyBanner;
+
+  // Fetch account snapshot only when needed (swallow errors → undefined).
+  let snapshot: AccountSnapshot | undefined;
+  if (needUsage && deps.getAccountSnapshot !== undefined) {
+    try {
+      snapshot = await deps.getAccountSnapshot();
+    } catch {
+      snapshot = undefined;
+    }
+  }
+
+  for (const target of targets) {
+    const screenText = screens.get(target.label);
+    // Skip panes whose capture failed this round.
+    if (screenText === undefined) continue;
+
     let state = states.get(target.label);
     if (!state) {
       state = createState();
@@ -305,11 +327,11 @@ export async function multiTick(
     state.missCount = 0;
     const before = state.status;
     try {
-      const status = await tickTarget(target, state, deps, marginSeconds, fallbackHours, snapshot);
+      const status = await tickTarget(target, state, screenText, deps, marginSeconds, fallbackHours, snapshot);
       logPaneStatus(log, target.label, before, state, status);
     } catch {
-      // This pane's capture/inject failed — leave its state, keep going.
-      log(`${target.label} — capture/inject error (skipped this round)`);
+      // This pane's inject failed — leave its state, keep going.
+      log(`${target.label} — inject error (skipped this round)`);
     }
   }
 }

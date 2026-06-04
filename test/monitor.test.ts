@@ -544,6 +544,83 @@ describe('stepState waiting branch — self-correcting', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Conditional usage API fetch
+// ---------------------------------------------------------------------------
+
+describe('multiTick — conditional getAccountSnapshot', () => {
+  it('no banner + no waiting pane → getAccountSnapshot NOT called', async () => {
+    const states: PaneStates = new Map();
+    let snapCalls = 0;
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1'), tgt('projB:0')],
+        screens: {
+          'projA:1': 'Claude is ready.',
+          'projB:0': 'Claude is ready.',
+        },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => {
+        snapCalls++;
+        return makeSnapshot([[ACCOUNT_DIR, { limited: false, resetsAtMs: null }]]);
+      },
+    };
+    await multiTick(states, deps);
+    assert.equal(snapCalls, 0, 'getAccountSnapshot must NOT be called when no banner and no waiting pane');
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+    assert.equal(states.get('projB:0')!.status, 'monitoring');
+  });
+
+  it('banner present → getAccountSnapshot called once, staleness/limit path works', async () => {
+    const states: PaneStates = new Map();
+    let snapCalls = 0;
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: true, resetsAtMs: RESET_MS }]]);
+    const marginSeconds = 60;
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': '5-hour limit reached\nresets 3pm (UTC)' },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => {
+        snapCalls++;
+        return snapshot;
+      },
+    };
+    await multiTick(states, deps, marginSeconds);
+    assert.equal(snapCalls, 1, 'getAccountSnapshot must be called exactly once when banner present');
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+    assert.equal(states.get('projA:1')!.waitUntil, RESET_MS + marginSeconds * 1000);
+  });
+
+  it('pane already waiting (no new banner elsewhere) → getAccountSnapshot called once', async () => {
+    const states: PaneStates = new Map();
+    // Pre-set a waiting pane
+    const waitState = createState();
+    waitState.status = 'waiting';
+    waitState.waitUntil = FIXED_NOW + 3_600_000; // 1h ahead, not elapsed
+    states.set('projA:1', waitState);
+
+    let snapCalls = 0;
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: true, resetsAtMs: FIXED_NOW + 3_600_000 }]]);
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': '5-hour limit reached\nresets 3pm (UTC)' },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => {
+        snapCalls++;
+        return snapshot;
+      },
+    };
+    await multiTick(states, deps);
+    assert.equal(snapCalls, 1, 'getAccountSnapshot must be called when a pane is already waiting');
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Change 2: miss-counter prune
 // ---------------------------------------------------------------------------
 
