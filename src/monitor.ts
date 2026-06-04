@@ -63,8 +63,13 @@ async function stepState(
     if (now < state.waitUntil) {
       return 'rate-limited';
     }
-    // Wait period elapsed — inject continue
-    await injectContinue();
+    // Wait period elapsed — only inject if the limit banner is still present.
+    // If it's gone (claude exited, shell prompt, pane reused, user already continued)
+    // skip the injection and return to monitoring silently.
+    const stillLimited = match(screenText).limited;
+    if (stillLimited) {
+      await injectContinue();
+    }
     state.status = 'monitoring';
     state.waitUntil = 0;
     return 'retried';

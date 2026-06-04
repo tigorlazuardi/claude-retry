@@ -63,7 +63,8 @@ describe('tick', () => {
     const state = createState();
     state.status = 'waiting';
     state.waitUntil = FIXED_NOW - 1; // already in the past
-    const deps = makeDeps({ now: () => FIXED_NOW });
+    // Banner still present — inject should fire
+    const deps = makeDeps({ captureText: '5-hour limit reached\nresets 3pm (UTC)', now: () => FIXED_NOW });
     const status = await tick('pane-1', state, deps);
     assert.equal(status, 'retried');
     assert.equal(deps.injected.length, 1);
@@ -106,6 +107,38 @@ describe('tick', () => {
     const deps2 = { ...deps, capture: async (_: string) => 'Claude is ready to help.' };
     const s4 = await tick('pane-1', state, deps2 as MonitorDeps);
     assert.equal(s4, 'monitoring');
+  });
+
+  it('waiting + elapsed + banner STILL present → injectContinue called, status→monitoring', async () => {
+    const state = createState();
+    state.status = 'waiting';
+    state.waitUntil = FIXED_NOW - 1; // elapsed
+    const deps = makeDeps({
+      captureText: '5-hour limit reached\nresets 3pm (UTC)',
+      now: () => FIXED_NOW,
+    });
+    const status = await tick('pane-1', state, deps);
+    assert.equal(status, 'retried');
+    assert.equal(deps.injected.length, 1, 'should inject continue when banner still visible');
+    assert.deepEqual(deps.injected[0], ['pane-1', 'continue']);
+    assert.equal(state.status, 'monitoring');
+    assert.equal(state.waitUntil, 0);
+  });
+
+  it('waiting + elapsed + banner GONE (shell prompt) → injectContinue NOT called, status→monitoring', async () => {
+    const state = createState();
+    state.status = 'waiting';
+    state.waitUntil = FIXED_NOW - 1; // elapsed
+    // Pane now shows a shell prompt — banner gone (claude exited, pane reused, user continued, etc.)
+    const deps = makeDeps({
+      captureText: 'user@host:~$ ',
+      now: () => FIXED_NOW,
+    });
+    const status = await tick('pane-1', state, deps);
+    assert.equal(status, 'retried');
+    assert.equal(deps.injected.length, 0, 'should NOT inject when banner is gone');
+    assert.equal(state.status, 'monitoring');
+    assert.equal(state.waitUntil, 0);
   });
 });
 
