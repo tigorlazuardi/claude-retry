@@ -52,7 +52,8 @@ describe('tick', () => {
     const state = createState();
     state.status = 'waiting';
     state.waitUntil = FIXED_NOW + 3600000; // 1h from now
-    const deps = makeDeps({ now: () => FIXED_NOW });
+    // Banner still present so rule 1 (banner gone) does not fire; timer not elapsed → rate-limited
+    const deps = makeDeps({ captureText: '5-hour limit reached\nresets 3pm (UTC)', now: () => FIXED_NOW });
     const status = await tick('pane-1', state, deps);
     assert.equal(status, 'rate-limited');
     assert.equal(deps.injected.length, 0);
@@ -130,12 +131,13 @@ describe('tick', () => {
     state.status = 'waiting';
     state.waitUntil = FIXED_NOW - 1; // elapsed
     // Pane now shows a shell prompt — banner gone (claude exited, pane reused, user continued, etc.)
+    // New behavior: rule 1 (banner gone) fires first → returns 'monitoring' (not 'retried')
     const deps = makeDeps({
       captureText: 'user@host:~$ ',
       now: () => FIXED_NOW,
     });
     const status = await tick('pane-1', state, deps);
-    assert.equal(status, 'retried');
+    assert.equal(status, 'monitoring');
     assert.equal(deps.injected.length, 0, 'should NOT inject when banner is gone');
     assert.equal(state.status, 'monitoring');
     assert.equal(state.waitUntil, 0);
@@ -184,12 +186,17 @@ describe('multiTick', () => {
     assert.equal(deps.injected.length, 0);
   });
 
-  it('prunes state when a target disappears', async () => {
+  it('prunes state when a target disappears (after MAX_MISSES=3 passes)', async () => {
     const states: PaneStates = new Map();
     states.set('gone:9', createState());
     states.get('gone:9')!.status = 'waiting';
     const deps = makeMultiDeps({ targets: [tgt('projA:1')], screens: { 'projA:1': 'ready' } });
-    await multiTick(states, deps);
+    // Miss counter: need 3 consecutive misses before pruned
+    await multiTick(states, deps); // miss 1
+    assert.ok(states.has('gone:9'), 'still present after miss 1');
+    await multiTick(states, deps); // miss 2
+    assert.ok(states.has('gone:9'), 'still present after miss 2');
+    await multiTick(states, deps); // miss 3 → pruned
     assert.equal(states.has('gone:9'), false);
     assert.equal(states.has('projA:1'), true);
   });
@@ -415,5 +422,204 @@ describe('multiTick — account-aware limit resolution', () => {
     await assert.doesNotReject(() => multiTick(states, deps));
     // Text fallback → still goes waiting
     assert.equal(states.get('projA:1')!.status, 'waiting');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Change 1: self-correcting waiting branch
+// ---------------------------------------------------------------------------
+
+const LIMITED_SCREEN_W = '5-hour limit reached\nresets 3pm (UTC)';
+const RESET_MS_W = new Date('2024-01-15T15:00:00Z').getTime();
+const ACCOUNT_DIR_W = '/home/user/.claude';
+
+function makeWaitingTarget() {
+  const state = createState();
+  state.status = 'waiting';
+  state.waitUntil = FIXED_NOW + 3_600_000; // 1h in the future
+  return state;
+}
+
+describe('stepState waiting branch — self-correcting', () => {
+  it('banner GONE (pre-reset) → status monitoring, injectContinue NOT called', async () => {
+    const states: PaneStates = new Map();
+    const state = makeWaitingTarget();
+    states.set('projA:1', state);
+
+    const deps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': 'Claude is ready.' }, // banner gone
+      now: () => FIXED_NOW,
+    });
+
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+    assert.equal(states.get('projA:1')!.waitUntil, 0);
+    assert.equal(deps.injected.length, 0, 'must NOT inject when banner gone');
+  });
+
+  it('banner present, account NOT limited (pre-reset) → monitoring, no inject', async () => {
+    const states: PaneStates = new Map();
+    const state = makeWaitingTarget();
+    states.set('projA:1', state);
+
+    const snapshot = makeSnapshot([[ACCOUNT_DIR_W, { limited: false, resetsAtMs: null }]]);
+    const deps: MultiMonitorDeps & { injected: Array<[string, string]> } = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': LIMITED_SCREEN_W },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => snapshot,
+      resolvePaneAccount: async (_t, _s) => ACCOUNT_DIR_W,
+    } as MultiMonitorDeps & { injected: Array<[string, string]> };
+    // carry injected from base
+    const base = makeMultiDeps({ targets: [tgt('projA:1')], screens: { 'projA:1': LIMITED_SCREEN_W }, now: () => FIXED_NOW });
+    const fullDeps = { ...base, getAccountSnapshot: async () => snapshot, resolvePaneAccount: async (_t: unknown, _s: unknown) => ACCOUNT_DIR_W };
+
+    await multiTick(states, fullDeps);
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+    assert.equal(states.get('projA:1')!.waitUntil, 0);
+    assert.equal(base.injected.length, 0, 'must NOT inject for stale banner (account not limited)');
+  });
+
+  it('banner present, no snapshot, pre-reset → stays waiting (rate-limited), no inject', async () => {
+    const states: PaneStates = new Map();
+    const state = makeWaitingTarget();
+    states.set('projA:1', state);
+
+    const deps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': LIMITED_SCREEN_W },
+      now: () => FIXED_NOW,
+    });
+
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+    assert.equal(deps.injected.length, 0, 'must NOT inject before timer elapses');
+  });
+
+  it('banner present, elapsed, no snapshot → inject once → monitoring (retried)', async () => {
+    const states: PaneStates = new Map();
+    const state = createState();
+    state.status = 'waiting';
+    state.waitUntil = FIXED_NOW - 1; // already elapsed
+    states.set('projA:1', state);
+
+    const deps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': LIMITED_SCREEN_W },
+      now: () => FIXED_NOW,
+    });
+
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+    assert.deepEqual(deps.injected, [['projA:1', 'continue']]);
+  });
+
+  it('banner present, still limited with future resetsAtMs → waitUntil refreshed, stays waiting, no inject', async () => {
+    const states: PaneStates = new Map();
+    const marginSeconds = 60;
+    // waitUntil is in past (would normally trigger inject) but resetsAtMs is far future
+    const futureReset = FIXED_NOW + 2 * 3_600_000; // 2h from now
+    const state = createState();
+    state.status = 'waiting';
+    state.waitUntil = FIXED_NOW - 1; // elapsed
+    states.set('projA:1', state);
+
+    const snapshot = makeSnapshot([[ACCOUNT_DIR_W, { limited: true, resetsAtMs: futureReset }]]);
+    const base = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': LIMITED_SCREEN_W },
+      now: () => FIXED_NOW,
+    });
+    const fullDeps = { ...base, getAccountSnapshot: async () => snapshot, resolvePaneAccount: async (_t: unknown, _s: unknown) => ACCOUNT_DIR_W };
+
+    await multiTick(states, fullDeps, marginSeconds);
+    const updated = states.get('projA:1')!;
+    assert.equal(updated.status, 'waiting', 'should stay waiting after waitUntil refresh');
+    assert.equal(updated.waitUntil, futureReset + marginSeconds * 1000, 'waitUntil should be refreshed to resetsAtMs+margin');
+    assert.equal(base.injected.length, 0, 'must NOT inject when refreshed waitUntil is still in future');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Change 2: miss-counter prune
+// ---------------------------------------------------------------------------
+
+describe('multiTick — miss-counter prune', () => {
+  it('pane absent 1 then 2 passes (< MAX_MISSES) then returns → state preserved, not recreated', async () => {
+    const states: PaneStates = new Map();
+    let targets = [tgt('projA:1'), tgt('projB:0')];
+
+    const deps = makeMultiDeps({
+      targets: () => targets,
+      screens: {
+        'projA:1': '5-hour limit reached\nresets 3pm (UTC)',
+        'projB:0': 'ready',
+      },
+      now: () => FIXED_NOW,
+    });
+
+    // Pass 1: both present, projA:1 goes waiting
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+    const savedWaitUntil = states.get('projA:1')!.waitUntil;
+
+    // Pass 2: projA:1 absent (miss 1)
+    targets = [tgt('projB:0')];
+    await multiTick(states, deps);
+    assert.ok(states.has('projA:1'), 'state must survive 1 miss');
+    assert.equal(states.get('projA:1')!.status, 'waiting', 'status preserved');
+    assert.equal(states.get('projA:1')!.waitUntil, savedWaitUntil, 'waitUntil preserved');
+    assert.equal(states.get('projA:1')!.missCount, 1);
+
+    // Pass 3: projA:1 absent (miss 2)
+    await multiTick(states, deps);
+    assert.ok(states.has('projA:1'), 'state must survive 2 misses');
+    assert.equal(states.get('projA:1')!.missCount, 2);
+
+    // Pass 4: projA:1 returns → missCount reset, state intact
+    targets = [tgt('projA:1'), tgt('projB:0')];
+    await multiTick(states, deps);
+    assert.ok(states.has('projA:1'), 'state still present after return');
+    assert.equal(states.get('projA:1')!.missCount, 0, 'missCount reset on return');
+    // waitUntil still set (banner still showing, pane still waiting)
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+  });
+
+  it('pane absent MAX_MISSES consecutive passes → state deleted', async () => {
+    const states: PaneStates = new Map();
+    states.set('projA:1', createState());
+    states.get('projA:1')!.status = 'waiting';
+    states.get('projA:1')!.waitUntil = FIXED_NOW + 3_600_000;
+
+    const deps = makeMultiDeps({
+      targets: [tgt('projB:0')],
+      screens: { 'projB:0': 'ready' },
+      now: () => FIXED_NOW,
+    });
+
+    // 3 consecutive misses = MAX_MISSES → dropped
+    await multiTick(states, deps); // miss 1
+    assert.ok(states.has('projA:1'), 'still present after miss 1');
+    await multiTick(states, deps); // miss 2
+    assert.ok(states.has('projA:1'), 'still present after miss 2');
+    await multiTick(states, deps); // miss 3 → pruned
+    assert.equal(states.has('projA:1'), false, 'state must be deleted after MAX_MISSES');
+  });
+
+  it('pane present every pass → missCount stays 0', async () => {
+    const states: PaneStates = new Map();
+    const deps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': 'ready' },
+      now: () => FIXED_NOW,
+    });
+
+    await multiTick(states, deps);
+    await multiTick(states, deps);
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.missCount, 0);
   });
 });

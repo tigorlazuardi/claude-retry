@@ -2,6 +2,7 @@ import { match } from './patterns.ts';
 import { parseResetTime, calculateWaitMs } from './time-parser.ts';
 import type { PaneTarget } from './zellij.ts';
 import type { AccountSnapshot } from './accounts.ts';
+import type { AccountUsage } from './usage.ts';
 
 export interface MonitorDeps {
   capture: (paneId: string) => Promise<string>;
@@ -33,10 +34,46 @@ export type MonitorStatus = 'monitoring' | 'rate-limited' | 'retried' | 'exited'
 export interface MonitorState {
   status: 'monitoring' | 'waiting';
   waitUntil: number;
+  missCount: number;
 }
 
+const MAX_MISSES = 3;
+
 export function createState(): MonitorState {
-  return { status: 'monitoring', waitUntil: 0 };
+  return { status: 'monitoring', waitUntil: 0, missCount: 0 };
+}
+
+/**
+ * Resolve which account dir (if any) applies to this pane, and return its usage.
+ * Mirrors the account-resolution logic previously inline in the monitoring branch.
+ */
+async function resolveAccountUsage(
+  snapshot: AccountSnapshot | undefined,
+  resolvePaneAccount: ((t: PaneTarget, s: AccountSnapshot) => Promise<string | null>) | undefined,
+  target: PaneTarget | undefined,
+): Promise<{ dir: string | null; usage: AccountUsage | undefined }> {
+  if (snapshot === undefined) {
+    return { dir: null, usage: undefined };
+  }
+
+  let dir: string | null = null;
+
+  if (snapshot.byDir.size === 1) {
+    dir = [...snapshot.byDir.keys()][0]!;
+  } else {
+    const limitedDirs: string[] = [];
+    for (const [d, usage] of snapshot.byDir) {
+      if (usage.limited) limitedDirs.push(d);
+    }
+    if (limitedDirs.length === 1) {
+      dir = limitedDirs[0]!;
+    } else if (target !== undefined && resolvePaneAccount !== undefined) {
+      dir = await resolvePaneAccount(target, snapshot);
+    }
+  }
+
+  const usage = dir !== null ? snapshot.byDir.get(dir) : undefined;
+  return { dir, usage };
 }
 
 /**
@@ -59,17 +96,42 @@ async function stepState(
   target?: PaneTarget,
   log?: (msg: string) => void,
 ): Promise<MonitorStatus> {
+  const logger = log ?? (() => {});
+  const label = target?.label ?? 'pane';
+
   if (state.status === 'waiting') {
+    const limited = match(screenText).limited;
+    const { usage } = await resolveAccountUsage(snapshot, resolvePaneAccount, target);
+    const marginMs = (marginSeconds ?? 60) * 1000;
+
+    // 1. Banner gone → limit cleared / claude exited / user already continued / pane reused
+    if (!limited) {
+      state.status = 'monitoring';
+      state.waitUntil = 0;
+      logger(`${label} wait abandoned (banner gone)`);
+      return 'monitoring';
+    }
+
+    // 2. Account known and NOT limited → stale banner persisting → drop
+    if (usage !== undefined && !usage.limited) {
+      state.status = 'monitoring';
+      state.waitUntil = 0;
+      logger(`${label} wait abandoned (account not limited)`);
+      return 'monitoring';
+    }
+
+    // 3. Account known, still limited, with a fresh resetsAtMs → refresh waitUntil
+    if (usage !== undefined && usage.limited && usage.resetsAtMs !== null) {
+      state.waitUntil = usage.resetsAtMs + marginMs;
+    }
+
+    // 4. Timer not elapsed → keep waiting
     if (now < state.waitUntil) {
       return 'rate-limited';
     }
-    // Wait period elapsed — only inject if the limit banner is still present.
-    // If it's gone (claude exited, shell prompt, pane reused, user already continued)
-    // skip the injection and return to monitoring silently.
-    const stillLimited = match(screenText).limited;
-    if (stillLimited) {
-      await injectContinue();
-    }
+
+    // 5. Elapsed + banner still present (+ account limited or unknown) → inject
+    await injectContinue();
     state.status = 'monitoring';
     state.waitUntil = 0;
     return 'retried';
@@ -78,54 +140,27 @@ async function stepState(
   // state.status === 'monitoring'
   const result = match(screenText);
   if (result.limited) {
-    const label = target?.label ?? 'pane';
-    const logger = log ?? (() => {});
-
     // Tier 1: account-aware resolution when snapshot is available
     if (snapshot !== undefined) {
-      let accountDir: string | null = null;
+      const { dir: accountDir, usage } = await resolveAccountUsage(snapshot, resolvePaneAccount, target);
 
-      if (snapshot.byDir.size === 1) {
-        // Single account — always attributable, regardless of limited state
-        // (covers both fresh-limit and stale-banner cases without resolver)
-        accountDir = [...snapshot.byDir.keys()][0]!;
-      } else {
-        // Find dirs that are limited in snapshot
-        const limitedDirs: string[] = [];
-        for (const [dir, usage] of snapshot.byDir) {
-          if (usage.limited) limitedDirs.push(dir);
+      if (accountDir !== null && usage !== undefined) {
+        if (!usage.limited) {
+          // Staleness gate: account is not limited → banner is stale → ignore
+          logger(`${label} stale banner ignored (account not limited)`);
+          return 'monitoring';
         }
-
-        if (limitedDirs.length === 1) {
-          // Exactly one limited account — attribute banner to it
-          accountDir = limitedDirs[0]!;
-        } else if (target !== undefined && resolvePaneAccount !== undefined) {
-          // Ambiguous (0 or 2+) — try proc bridge (phase 2 stub, returns null)
-          accountDir = await resolvePaneAccount(target, snapshot);
+        // Account confirmed limited — use resetsAtMs if available
+        const marginMs = (marginSeconds ?? 60) * 1000;
+        if (usage.resetsAtMs !== null) {
+          state.waitUntil = usage.resetsAtMs + marginMs;
+          state.status = 'waiting';
+          logger(`${label} account ${accountDir} limited, reset ${new Date(usage.resetsAtMs).toISOString()}`);
+          return 'rate-limited';
         }
-      }
-
-      if (accountDir !== null) {
-        const usage = snapshot.byDir.get(accountDir);
-        if (usage !== undefined) {
-          if (!usage.limited) {
-            // Staleness gate: account is not limited → banner is stale → ignore
-            logger(`${label} stale banner ignored (account not limited)`);
-            return 'monitoring';
-          }
-          // Account confirmed limited — use resetsAtMs if available
-          const marginMs = (marginSeconds ?? 60) * 1000;
-          if (usage.resetsAtMs !== null) {
-            state.waitUntil = usage.resetsAtMs + marginMs;
-            state.status = 'waiting';
-            logger(`${label} account ${accountDir} limited, reset ${new Date(usage.resetsAtMs).toISOString()}`);
-            return 'rate-limited';
-          }
-          // resetsAtMs null — fall through to text parse for the time, but
-          // we know account is limited so we don't need to gate on text
-          // (fall through to tier 3 below)
-        }
-        // usage missing for this dir — fall through to tier 3
+        // resetsAtMs null — fall through to text parse for the time, but
+        // we know account is limited so we don't need to gate on text
+        // (fall through to tier 3 below)
       }
       // accountDir null or usage missing — fall through to tier 3
     }
@@ -205,6 +240,10 @@ export async function runMonitor(
  * target's label (session:paneId), and persists across calls. A failed
  * discovery or a single pane's capture/inject error is swallowed so one bad
  * pane never stops the others.
+ *
+ * Uses a miss counter (MAX_MISSES) so transient list-panes failures don't
+ * prune waiting state immediately — a pane must be absent for MAX_MISSES
+ * consecutive passes before its state is dropped.
  */
 export async function multiTick(
   states: PaneStates,
@@ -233,12 +272,19 @@ export async function multiTick(
     }
   }
 
-  // Prune state for panes that no longer exist.
+  // Prune state for panes that no longer exist, using miss counter to tolerate
+  // transient list-panes failures.
   const live = new Set(targets.map((t) => t.label));
   for (const key of [...states.keys()]) {
     if (!live.has(key)) {
-      states.delete(key);
-      log(`${key} gone — dropped from watch`);
+      const s = states.get(key)!;
+      s.missCount++;
+      if (s.missCount >= MAX_MISSES) {
+        states.delete(key);
+        log(`${key} gone — dropped after ${MAX_MISSES} misses`);
+      } else {
+        log(`${key} missing (${s.missCount}/${MAX_MISSES}) — keeping state`);
+      }
     }
   }
 
@@ -255,6 +301,8 @@ export async function multiTick(
       states.set(target.label, state);
       log(`${target.label} — new Claude pane, now watching`);
     }
+    // Reset miss counter for panes present this pass
+    state.missCount = 0;
     const before = state.status;
     try {
       const status = await tickTarget(target, state, deps, marginSeconds, fallbackHours, snapshot);
