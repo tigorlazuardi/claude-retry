@@ -8,6 +8,7 @@ import {
   type MultiMonitorDeps,
   type PaneStates,
 } from '../src/monitor.ts';
+import type { AccountSnapshot } from '../src/accounts.ts';
 
 const FIXED_NOW = new Date('2024-01-15T10:00:00Z').getTime();
 
@@ -223,5 +224,163 @@ describe('multiTick', () => {
     } as MultiMonitorDeps & { injected: Array<[string, string]> };
     await multiTick(states, deps);
     assert.equal(states.get('projB:2')!.status, 'waiting');
+  });
+});
+
+// Helper: build a fake AccountSnapshot
+function makeSnapshot(entries: Array<[string, { limited: boolean; resetsAtMs: number | null }]>): AccountSnapshot {
+  return { byDir: new Map(entries) };
+}
+
+const ACCOUNT_DIR = '/home/user/.claude';
+const RESET_MS = new Date('2024-01-15T15:00:00Z').getTime(); // epoch ms for reset
+
+describe('multiTick — account-aware limit resolution', () => {
+  const LIMITED_SCREEN = '5-hour limit reached\nresets 3pm (UTC)';
+
+  it('staleness gate: banner present but account NOT limited → stays monitoring', async () => {
+    const states: PaneStates = new Map();
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: false, resetsAtMs: null }]]);
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': LIMITED_SCREEN },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => snapshot,
+      resolvePaneAccount: async (_t, _s) => ACCOUNT_DIR,
+    };
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.status, 'monitoring', 'stale banner should not trigger wait');
+    assert.equal(states.get('projA:1')!.waitUntil, 0);
+  });
+
+  it('staleness gate: single account in byDir, limited:false, NO resolver → stale banner ignored', async () => {
+    // Real-world wiring: resolvePaneAccount is a stub returning null.
+    // Single-account user with a stale banner (account already reset, util low → 0 limited dirs).
+    // Before fix: accountDir would be null → tier 3 → re-waits on stale banner.
+    // After fix: byDir.size === 1 → sole key → staleness gate fires → stays monitoring.
+    const states: PaneStates = new Map();
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: false, resetsAtMs: null }]]);
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': LIMITED_SCREEN },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => snapshot,
+      // resolvePaneAccount intentionally absent (undefined) — real CLI wires a stub returning null
+    };
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.status, 'monitoring', 'stale banner (no resolver) must not trigger wait');
+    assert.equal(states.get('projA:1')!.waitUntil, 0);
+  });
+
+  it('single account in byDir, limited:true, resetsAtMs set, no resolver → waits to resetsAtMs+margin', async () => {
+    const states: PaneStates = new Map();
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: true, resetsAtMs: RESET_MS }]]);
+    const marginSeconds = 60;
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': LIMITED_SCREEN },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => snapshot,
+      // resolvePaneAccount intentionally absent
+    };
+    await multiTick(states, deps, marginSeconds);
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+    assert.equal(states.get('projA:1')!.waitUntil, RESET_MS + marginSeconds * 1000);
+  });
+
+  it('account limited with resetsAtMs: waitUntil === resetsAtMs + margin', async () => {
+    const states: PaneStates = new Map();
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: true, resetsAtMs: RESET_MS }]]);
+    const marginSeconds = 60;
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': LIMITED_SCREEN },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => snapshot,
+      resolvePaneAccount: async (_t, _s) => ACCOUNT_DIR,
+    };
+    await multiTick(states, deps, marginSeconds);
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+    assert.equal(states.get('projA:1')!.waitUntil, RESET_MS + marginSeconds * 1000);
+  });
+
+  it('snapshot absent → text fallback path still works', async () => {
+    // No getAccountSnapshot — existing text-based behavior
+    const states: PaneStates = new Map();
+    const deps: MultiMonitorDeps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': LIMITED_SCREEN },
+      now: () => FIXED_NOW,
+    });
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+    assert.ok(states.get('projA:1')!.waitUntil > FIXED_NOW, 'text fallback should set future waitUntil');
+  });
+
+  it('account unknown (resolvePaneAccount returns null) → text fallback, banner NOT ignored', async () => {
+    const states: PaneStates = new Map();
+    // snapshot has one limited account but resolver returns null (ambiguous)
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: true, resetsAtMs: RESET_MS }]]);
+    // Make snapshot have 2 limited dirs so single-limited shortcut doesn't fire
+    snapshot.byDir.set('/home/other/.claude', { limited: true, resetsAtMs: RESET_MS });
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': LIMITED_SCREEN },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => snapshot,
+      resolvePaneAccount: async (_t, _s) => null,
+    };
+    await multiTick(states, deps);
+    // Should still go to waiting via text fallback — NOT ignored
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+    assert.ok(states.get('projA:1')!.waitUntil > FIXED_NOW);
+  });
+
+  it('single limited account resolved automatically (no resolvePaneAccount needed)', async () => {
+    const states: PaneStates = new Map();
+    // snapshot has exactly ONE limited dir → attributed automatically
+    const snapshot = makeSnapshot([
+      [ACCOUNT_DIR, { limited: true, resetsAtMs: RESET_MS }],
+      ['/home/other/.claude', { limited: false, resetsAtMs: null }],
+    ]);
+    const marginSeconds = 60;
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': LIMITED_SCREEN },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => snapshot,
+      // resolvePaneAccount intentionally omitted
+    };
+    await multiTick(states, deps, marginSeconds);
+    assert.equal(states.get('projA:1')!.status, 'waiting');
+    assert.equal(states.get('projA:1')!.waitUntil, RESET_MS + marginSeconds * 1000);
+  });
+
+  it('getAccountSnapshot error swallowed → text fallback, no throw from multiTick', async () => {
+    const states: PaneStates = new Map();
+    const deps: MultiMonitorDeps = {
+      ...makeMultiDeps({
+        targets: [tgt('projA:1')],
+        screens: { 'projA:1': LIMITED_SCREEN },
+        now: () => FIXED_NOW,
+      }),
+      getAccountSnapshot: async () => { throw new Error('network error'); },
+    };
+    // Must not throw
+    await assert.doesNotReject(() => multiTick(states, deps));
+    // Text fallback → still goes waiting
+    assert.equal(states.get('projA:1')!.status, 'waiting');
   });
 });

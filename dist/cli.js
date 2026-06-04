@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { capturePane, inject, listPaneTargets, captureTarget, injectTarget, } from "./zellij.js";
 import { runMonitor, runMultiMonitor } from "./monitor.js";
+import { readAccessToken, fetchUsage } from "./usage.js";
+import { discoverAccountDirs, resolvePaneConfigDir } from "./accounts.js";
 const USAGE = `claude-retry — Auto-inject 'continue' when Claude hits a rate limit in zellij
 
 Usage:
@@ -37,6 +39,25 @@ const multiDeps = {
     now,
     sleep,
     log,
+    getAccountSnapshot: async () => {
+        const dirs = await discoverAccountDirs();
+        const byDir = new Map();
+        await Promise.all(dirs.map(async (dir) => {
+            try {
+                const tok = await readAccessToken(dir);
+                if (!tok)
+                    return;
+                const usage = await fetchUsage(tok.token);
+                if (usage)
+                    byDir.set(dir, usage);
+            }
+            catch {
+                // swallow per-account errors — one bad account must not break the pass
+            }
+        }));
+        return { byDir };
+    },
+    resolvePaneAccount: (t, snapshot) => resolvePaneConfigDir(t, snapshot),
 };
 const [, , subcommand, ...rest] = process.argv;
 async function main() {
@@ -54,6 +75,7 @@ async function main() {
         }
         case 'start': {
             log('claude-retry daemon starting — walking all sessions/panes (poll 60s)');
+            log('usage-API detection enabled — account-aware rate-limit resolution active');
             await runMultiMonitor(multiDeps);
             break;
         }

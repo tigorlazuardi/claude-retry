@@ -1,6 +1,7 @@
 import { match } from './patterns.ts';
 import { parseResetTime, calculateWaitMs } from './time-parser.ts';
 import type { PaneTarget } from './zellij.ts';
+import type { AccountSnapshot } from './accounts.ts';
 
 export interface MonitorDeps {
   capture: (paneId: string) => Promise<string>;
@@ -19,6 +20,10 @@ export interface MultiMonitorDeps {
   sleep: (ms: number) => Promise<void>;
   /** Optional sink for chatty progress logs (wired to stderr by the CLI). */
   log?: (msg: string) => void;
+  /** If provided, called ONCE per multiTick pass to get current account usage snapshot. */
+  getAccountSnapshot?: () => Promise<AccountSnapshot>;
+  /** If provided, used to resolve which account a pane belongs to when ambiguous. */
+  resolvePaneAccount?: (t: PaneTarget, s: AccountSnapshot) => Promise<string | null>;
 }
 
 export type PaneStates = Map<string, MonitorState>;
@@ -38,6 +43,9 @@ export function createState(): MonitorState {
  * Core state transition for one pane, given its current screen text.
  * `injectContinue` is called only when a wait period has elapsed. Shared by
  * single-pane (tick) and multi-session (tickTarget) monitoring.
+ *
+ * When snapshot/resolver/target/log are provided, applies the three-tier
+ * account-aware limit resolution. Single-pane callers omit these — text path only.
  */
 async function stepState(
   state: MonitorState,
@@ -46,6 +54,10 @@ async function stepState(
   injectContinue: () => Promise<void>,
   marginSeconds?: number,
   fallbackHours?: number,
+  snapshot?: AccountSnapshot,
+  resolvePaneAccount?: (t: PaneTarget, s: AccountSnapshot) => Promise<string | null>,
+  target?: PaneTarget,
+  log?: (msg: string) => void,
 ): Promise<MonitorStatus> {
   if (state.status === 'waiting') {
     if (now < state.waitUntil) {
@@ -61,6 +73,59 @@ async function stepState(
   // state.status === 'monitoring'
   const result = match(screenText);
   if (result.limited) {
+    const label = target?.label ?? 'pane';
+    const logger = log ?? (() => {});
+
+    // Tier 1: account-aware resolution when snapshot is available
+    if (snapshot !== undefined) {
+      let accountDir: string | null = null;
+
+      if (snapshot.byDir.size === 1) {
+        // Single account — always attributable, regardless of limited state
+        // (covers both fresh-limit and stale-banner cases without resolver)
+        accountDir = [...snapshot.byDir.keys()][0]!;
+      } else {
+        // Find dirs that are limited in snapshot
+        const limitedDirs: string[] = [];
+        for (const [dir, usage] of snapshot.byDir) {
+          if (usage.limited) limitedDirs.push(dir);
+        }
+
+        if (limitedDirs.length === 1) {
+          // Exactly one limited account — attribute banner to it
+          accountDir = limitedDirs[0]!;
+        } else if (target !== undefined && resolvePaneAccount !== undefined) {
+          // Ambiguous (0 or 2+) — try proc bridge (phase 2 stub, returns null)
+          accountDir = await resolvePaneAccount(target, snapshot);
+        }
+      }
+
+      if (accountDir !== null) {
+        const usage = snapshot.byDir.get(accountDir);
+        if (usage !== undefined) {
+          if (!usage.limited) {
+            // Staleness gate: account is not limited → banner is stale → ignore
+            logger(`${label} stale banner ignored (account not limited)`);
+            return 'monitoring';
+          }
+          // Account confirmed limited — use resetsAtMs if available
+          const marginMs = (marginSeconds ?? 60) * 1000;
+          if (usage.resetsAtMs !== null) {
+            state.waitUntil = usage.resetsAtMs + marginMs;
+            state.status = 'waiting';
+            logger(`${label} account ${accountDir} limited, reset ${new Date(usage.resetsAtMs).toISOString()}`);
+            return 'rate-limited';
+          }
+          // resetsAtMs null — fall through to text parse for the time, but
+          // we know account is limited so we don't need to gate on text
+          // (fall through to tier 3 below)
+        }
+        // usage missing for this dir — fall through to tier 3
+      }
+      // accountDir null or usage missing — fall through to tier 3
+    }
+
+    // Tier 3: text fallback (current behavior, unchanged)
     const resetLine = result.resetLine ?? '';
     const parsed = parseResetTime(resetLine);
     const waitMs = calculateWaitMs(parsed, marginSeconds, fallbackHours, new Date(now));
@@ -96,6 +161,7 @@ async function tickTarget(
   deps: MultiMonitorDeps,
   marginSeconds?: number,
   fallbackHours?: number,
+  snapshot?: AccountSnapshot,
 ): Promise<MonitorStatus> {
   const screenText = await deps.capture(target);
   return stepState(
@@ -105,6 +171,10 @@ async function tickTarget(
     () => deps.inject(target, 'continue'),
     marginSeconds,
     fallbackHours,
+    snapshot,
+    deps.resolvePaneAccount,
+    target,
+    deps.log,
   );
 }
 
@@ -148,6 +218,16 @@ export async function multiTick(
     return;
   }
 
+  // Fetch account snapshot once per pass (swallow errors → undefined).
+  let snapshot: AccountSnapshot | undefined;
+  if (deps.getAccountSnapshot !== undefined) {
+    try {
+      snapshot = await deps.getAccountSnapshot();
+    } catch {
+      snapshot = undefined;
+    }
+  }
+
   // Prune state for panes that no longer exist.
   const live = new Set(targets.map((t) => t.label));
   for (const key of [...states.keys()]) {
@@ -172,7 +252,7 @@ export async function multiTick(
     }
     const before = state.status;
     try {
-      const status = await tickTarget(target, state, deps, marginSeconds, fallbackHours);
+      const status = await tickTarget(target, state, deps, marginSeconds, fallbackHours, snapshot);
       logPaneStatus(log, target.label, before, state, status);
     } catch {
       // This pane's capture/inject failed — leave its state, keep going.

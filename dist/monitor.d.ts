@@ -1,4 +1,5 @@
 import type { PaneTarget } from './zellij.ts';
+import type { AccountSnapshot } from './accounts.ts';
 export interface MonitorDeps {
     capture: (paneId: string) => Promise<string>;
     inject: (paneId: string, text: string) => Promise<void>;
@@ -15,6 +16,10 @@ export interface MultiMonitorDeps {
     sleep: (ms: number) => Promise<void>;
     /** Optional sink for chatty progress logs (wired to stderr by the CLI). */
     log?: (msg: string) => void;
+    /** If provided, called ONCE per multiTick pass to get current account usage snapshot. */
+    getAccountSnapshot?: () => Promise<AccountSnapshot>;
+    /** If provided, used to resolve which account a pane belongs to when ambiguous. */
+    resolvePaneAccount?: (t: PaneTarget, s: AccountSnapshot) => Promise<string | null>;
 }
 export type PaneStates = Map<string, MonitorState>;
 export type MonitorStatus = 'monitoring' | 'rate-limited' | 'retried' | 'exited';

@@ -1,6 +1,6 @@
 # claude-retry
 
-Watches every pane across **all** your [zellij](https://zellij.dev/) sessions. When a pane hits Anthropic's usage/session limit, it detects the rate-limit banner, waits until that pane's reset time, then clears the input and injects `continue` to resume automatically. One daemon covers every session at once — even detached ones.
+Watches every pane across **all** your [zellij](https://zellij.dev/) sessions. When a pane hits Anthropic's usage/session limit, it detects the on-screen rate-limit banner, then confirms against Anthropic's usage API — the same data the `/usage` command shows — to get the **exact** reset time and to discard stale banners. Once the reset elapses it clears the input and injects `continue` to resume automatically. One daemon covers every session at once — even detached ones.
 
 ## Install
 
@@ -59,16 +59,24 @@ Every pass (60s for `start`, 5s for single-pane `monitor`):
 
 1. **Discover** — `zellij list-sessions` enumerates live sessions (EXITED ones and the daemon's own `$ZELLIJ_SESSION_NAME` are skipped). For each, `zellij --session <name> action list-panes -j` lists its panes; plugins and exited panes are dropped. New panes are added, gone ones pruned.
 2. **Capture** — each pane's visible screen is dumped with `zellij --session <name> action dump-screen --pane-id <id>` (ANSI stripped). This works on detached sessions, no attached client required.
-3. **Match** — the text is checked against the rate-limit patterns. Panes that aren't showing a limit banner are simply left alone — no pane-identification guesswork needed.
-4. **Retry** — on detection, the reset time is parsed and the pane is marked `waiting`. Once the reset elapses, the daemon sends **Ctrl+C** (clears any half-typed input — a single Ctrl+C in Claude Code doesn't quit), then types `continue` and Enter via `write-chars` / `write`.
+3. **Match** — the text is checked against the rate-limit patterns. Panes that aren't showing a limit banner are simply left alone.
+4. **Resolve** — on a banner match, the reset time is determined via a three-tier cascade:
+   - **Tier 1 — usage API (primary).** Once per pass, the daemon discovers every Claude account in use by reading `CLAUDE_CONFIG_DIR` from each Claude process via `/proc` (Linux). For each account it calls `GET https://api.anthropic.com/api/oauth/usage` with the OAuth token from `<CLAUDE_CONFIG_DIR>/.credentials.json`. If the account is **not** limited the banner is stale — it is silently ignored, no wait issued. If the account **is** limited the daemon waits until the API's exact `resets_at` timestamp. Credentials are re-read every pass, so token refreshes are picked up automatically.
+   - **Tier 2 — /proc pane→account bridge (planned).** Needed only when two or more accounts are limited simultaneously, so the daemon must map a specific pane to its account. This is a phase-2 stub; until implemented, that case falls through to tier 3.
+   - **Tier 3 — text fallback.** Used when the API is unreachable, the account is unknown, or tier 2 is unresolved. Falls back to parsing the reset time from the on-screen banner text (the original behavior). A banner is never silently ignored when the account is unknown — this ensures a real limit is never missed.
+5. **Retry** — once the resolved reset time elapses, the daemon sends **Ctrl+C** (clears any half-typed input — a single Ctrl+C in Claude Code doesn't quit), then types `continue` and Enter via `write-chars` / `write`.
 
 Per-pane state (keyed by `session:paneId`) persists across passes, so a pane mid-wait isn't disturbed by rediscovery. It runs as a plain foreground process — no transparent session wrapping, no external daemon. The zellij pane is the daemon.
 
+> **Multi-account note.** On Linux, account discovery reads `CLAUDE_CONFIG_DIR` from every live Claude process via `/proc`. This means the daemon polls usage for every account in use — not just the default one. On non-Linux systems it falls back to the default account (`~/.claude`) plus tier-3 text parsing.
+
 ## Requirements
 
-- Node.js >= 20
+- Node.js >= 20 (required for global `fetch`, used by the usage API)
 - zellij >= 0.40
 - Must be inside a zellij session when running
+- A logged-in Claude Code installation with a valid `<CLAUDE_CONFIG_DIR>/.credentials.json` (for usage-API tier 1 detection; without it the daemon degrades to text parsing)
+- `/proc` account discovery is Linux-only; on other platforms the daemon uses the default account and text fallback
 
 ## Development
 
