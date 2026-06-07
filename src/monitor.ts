@@ -123,6 +123,12 @@ async function stepState(
     const timerElapsed = now >= state.waitUntil;
 
     if (accountCleared || timerElapsed) {
+      if (!isBlockedAtBanner(screenText)) {
+        state.status = 'monitoring';
+        state.waitUntil = 0;
+        logger(`${label} wait abandoned (no canonical banner at bottom)`);
+        return 'monitoring';
+      }
       await injectContinue();
       state.status = 'monitoring';
       state.waitUntil = 0;
@@ -180,6 +186,10 @@ async function stepState(
         return 'retried';
       }
       logger(`${label} stale banner ignored (reset already passed)`);
+      return 'monitoring';
+    }
+    if (!isBlockedAtBanner(screenText)) {
+      logger(`${label} loose limit text but no canonical banner — ignored`);
       return 'monitoring';
     }
     state.waitUntil = now + waitMs;

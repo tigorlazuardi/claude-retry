@@ -837,6 +837,51 @@ describe('multiTick — monitoring branch: fresh-pane aggressive inject', () => 
 });
 
 // ---------------------------------------------------------------------------
+// Fix: prose-mention guard — Hole B (false-park) and Hole A (false-inject)
+// ---------------------------------------------------------------------------
+
+describe('prose-mention guard — no canonical banner → no park and no inject', () => {
+  // T1 (Hole B): monitoring state, captureText is prose mentioning rate limits
+  // but NOT a canonical banner. Loose match() fires, but isBlockedAtBanner is
+  // false → must NOT park to waiting.
+  it('T1 Hole B: monitoring + loose-match prose (no canonical banner) → stays monitoring, not parked', async () => {
+    const states: PaneStates = new Map();
+    const proseText = 'discussing the rate-limit banner and when it resets';
+    const deps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': proseText },
+      now: () => FIXED_NOW,
+    });
+    await multiTick(states, deps);
+    assert.equal(states.get('projA:1')!.status, 'monitoring', 'prose must NOT park pane into waiting');
+    assert.equal(states.get('projA:1')!.waitUntil, 0);
+    assert.equal(deps.injected.length, 0, 'must NOT inject on prose mention');
+  });
+
+  // T2 (Hole A): pane already in waiting (timer elapsed), captureText is prose
+  // that matches loose match() but NOT a canonical banner. Must abandon the
+  // wait (set monitoring) and NOT inject continue.
+  it('T2 Hole A: waiting + elapsed + loose-match prose (no canonical banner) → no inject, transitions to monitoring', async () => {
+    const states: PaneStates = new Map();
+    const state = createState();
+    state.status = 'waiting';
+    state.waitUntil = FIXED_NOW - 1; // already elapsed
+    states.set('projA:1', state);
+
+    const proseText = 'discussing the rate-limit banner and when it resets';
+    const deps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': proseText },
+      now: () => FIXED_NOW,
+    });
+    await multiTick(states, deps);
+    assert.equal(deps.injected.length, 0, 'must NOT inject when no canonical banner at bottom');
+    assert.equal(states.get('projA:1')!.status, 'monitoring', 'must abandon wait when banner absent');
+    assert.equal(states.get('projA:1')!.waitUntil, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Loop order: tick-before-sleep
 // ---------------------------------------------------------------------------
 
