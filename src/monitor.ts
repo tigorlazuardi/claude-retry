@@ -104,7 +104,7 @@ async function stepState(
     const { usage } = await resolveAccountUsage(snapshot, resolvePaneAccount, target);
     const marginMs = (marginSeconds ?? 60) * 1000;
 
-    // 1. Banner gone → limit cleared / claude exited / user already continued / pane reused
+    // Banner absent → claude exited / user already continued / pane id reused → nothing to continue.
     if (!limited) {
       state.status = 'monitoring';
       state.waitUntil = 0;
@@ -112,29 +112,25 @@ async function stepState(
       return 'monitoring';
     }
 
-    // 2. Account known and NOT limited → stale banner persisting → drop
-    if (usage !== undefined && !usage.limited) {
-      state.status = 'monitoring';
-      state.waitUntil = 0;
-      logger(`${label} wait abandoned (account not limited)`);
-      return 'monitoring';
-    }
-
-    // 3. Account known, still limited, with a fresh resetsAtMs → refresh waitUntil
+    // Account still limited with a known reset → keep waitUntil aligned to the live reset time.
     if (usage !== undefined && usage.limited && usage.resetsAtMs !== null) {
       state.waitUntil = usage.resetsAtMs + marginMs;
     }
 
-    // 4. Timer not elapsed → keep waiting
-    if (now < state.waitUntil) {
-      return 'rate-limited';
+    // The limit is over when the account quota has cleared (early/real reset) OR the timer elapsed.
+    const accountCleared = usage !== undefined && !usage.limited;
+    const timerElapsed = now >= state.waitUntil;
+
+    if (accountCleared || timerElapsed) {
+      await injectContinue();
+      state.status = 'monitoring';
+      state.waitUntil = 0;
+      logger(`${label} reset reached — injected continue`);
+      return 'retried';
     }
 
-    // 5. Elapsed + banner still present (+ account limited or unknown) → inject
-    await injectContinue();
-    state.status = 'monitoring';
-    state.waitUntil = 0;
-    return 'retried';
+    // Still limited, before reset → keep waiting.
+    return 'rate-limited';
   }
 
   // state.status === 'monitoring'

@@ -458,29 +458,20 @@ describe('stepState waiting branch — self-correcting', () => {
     assert.equal(deps.injected.length, 0, 'must NOT inject when banner gone');
   });
 
-  it('banner present, account NOT limited (pre-reset) → monitoring, no inject', async () => {
+  it('account cleared at reset (banner present, account NOT limited) → injectContinue called, status→monitoring, returns retried', async () => {
     const states: PaneStates = new Map();
     const state = makeWaitingTarget();
     states.set('projA:1', state);
 
     const snapshot = makeSnapshot([[ACCOUNT_DIR_W, { limited: false, resetsAtMs: null }]]);
-    const deps: MultiMonitorDeps & { injected: Array<[string, string]> } = {
-      ...makeMultiDeps({
-        targets: [tgt('projA:1')],
-        screens: { 'projA:1': LIMITED_SCREEN_W },
-        now: () => FIXED_NOW,
-      }),
-      getAccountSnapshot: async () => snapshot,
-      resolvePaneAccount: async (_t, _s) => ACCOUNT_DIR_W,
-    } as MultiMonitorDeps & { injected: Array<[string, string]> };
-    // carry injected from base
     const base = makeMultiDeps({ targets: [tgt('projA:1')], screens: { 'projA:1': LIMITED_SCREEN_W }, now: () => FIXED_NOW });
     const fullDeps = { ...base, getAccountSnapshot: async () => snapshot, resolvePaneAccount: async (_t: unknown, _s: unknown) => ACCOUNT_DIR_W };
 
     await multiTick(states, fullDeps);
-    assert.equal(states.get('projA:1')!.status, 'monitoring');
+    assert.equal(states.get('projA:1')!.status, 'monitoring', 'should transition to monitoring after inject');
     assert.equal(states.get('projA:1')!.waitUntil, 0);
-    assert.equal(base.injected.length, 0, 'must NOT inject for stale banner (account not limited)');
+    assert.equal(base.injected.length, 1, 'must inject continue when account cleared but banner still present');
+    assert.deepEqual(base.injected[0], ['projA:1', 'continue']);
   });
 
   it('banner present, no snapshot, pre-reset → stays waiting (rate-limited), no inject', async () => {
@@ -540,6 +531,36 @@ describe('stepState waiting branch — self-correcting', () => {
     assert.equal(updated.status, 'waiting', 'should stay waiting after waitUntil refresh');
     assert.equal(updated.waitUntil, futureReset + marginSeconds * 1000, 'waitUntil should be refreshed to resetsAtMs+margin');
     assert.equal(base.injected.length, 0, 'must NOT inject when refreshed waitUntil is still in future');
+  });
+
+  // Regression test: the banner-still-present + account-cleared state is the NORMAL successful
+  // reset. Old code incorrectly abandoned without injecting ("account not limited" → monitoring).
+  // New behavior: account cleared while banner still present → inject continue (early-reset path).
+  it('REGRESSION: pane waiting, banner shows session limit, snapshot account cleared (early reset), now before original waitUntil → injectContinue called (NOT abandoned)', async () => {
+    const states: PaneStates = new Map();
+    const originalWaitUntil = FIXED_NOW + 3_600_000; // 1h in future
+    const pastResetMs = FIXED_NOW - 60_000; // reset was 1 min ago
+    const state = createState();
+    state.status = 'waiting';
+    state.waitUntil = originalWaitUntil;
+    states.set('projA:1', state);
+
+    // Real banner text from Claude — limit banner still on screen
+    const realBannerText = "You've hit your session limit · resets 12:50am (Asia/Jakarta)";
+    // Account snapshot shows cleared (early reset already happened)
+    const snapshot = makeSnapshot([[ACCOUNT_DIR_W, { limited: false, resetsAtMs: pastResetMs }]]);
+    const base = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': realBannerText },
+      now: () => FIXED_NOW, // before original waitUntil
+    });
+    const fullDeps = { ...base, getAccountSnapshot: async () => snapshot, resolvePaneAccount: async (_t: unknown, _s: unknown) => ACCOUNT_DIR_W };
+
+    await multiTick(states, fullDeps);
+    assert.equal(base.injected.length, 1, 'MUST inject continue on early reset — not abandon');
+    assert.deepEqual(base.injected[0], ['projA:1', 'continue']);
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+    assert.equal(states.get('projA:1')!.waitUntil, 0);
   });
 });
 
