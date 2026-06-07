@@ -1,6 +1,6 @@
-import { test } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, match } from '../src/patterns.ts';
+import { stripAnsi, match, strictMatch, isBlockedAtBanner } from '../src/patterns.ts';
 
 // --- stripAnsi ---
 
@@ -97,4 +97,108 @@ test('match: "rate limit" + "try again in 2 hours"', () => {
   const result = match(text);
   assert.equal(result.limited, true);
   assert.match(result.resetLine ?? '', /try again/i);
+});
+
+// --- strictMatch + isBlockedAtBanner ---
+
+describe('strictMatch', () => {
+  // True cases — canonical phrases
+  test('you\'ve hit your session limit', () => {
+    assert.equal(strictMatch("You've hit your session limit · resets 12:50am (Asia/Jakarta)"), true);
+  });
+
+  test('you’ve hit your session limit (curly apostrophe)', () => {
+    assert.equal(strictMatch('You’ve hit your session limit · resets 1:00am'), true);
+  });
+
+  test('you have hit your usage limit', () => {
+    assert.equal(strictMatch('you have hit your usage limit'), true);
+  });
+
+  test('5-hour limit reached', () => {
+    assert.equal(strictMatch('5-hour limit reached'), true);
+  });
+
+  test('12-hour limit reached', () => {
+    assert.equal(strictMatch('12-hour limit reached'), true);
+  });
+
+  test('usage limit reached', () => {
+    assert.equal(strictMatch('usage limit reached'), true);
+  });
+
+  test('session limit ... resets on same line', () => {
+    assert.equal(strictMatch('session limit · resets at 3:00pm'), true);
+  });
+
+  test('upgrade to increase your usage limit', () => {
+    assert.equal(strictMatch('upgrade to increase your usage limit'), true);
+  });
+
+  test('strips ANSI before matching', () => {
+    assert.equal(strictMatch('\x1b[31mYou’ve hit your session limit\x1b[0m · resets 2am'), true);
+  });
+
+  // False cases — incidental text
+  test('false: discussed rate limit and reset logic', () => {
+    assert.equal(strictMatch('we discussed the rate limit and reset logic'), false);
+  });
+
+  test('false: markdown table with rate limit column', () => {
+    assert.equal(strictMatch('| Rate limit | API gate |'), false);
+  });
+
+  test('false: stale banner ignored', () => {
+    assert.equal(strictMatch('stale banner ignored'), false);
+  });
+
+  test('false: plain normal text', () => {
+    assert.equal(strictMatch('everything looks fine'), false);
+  });
+});
+
+describe('isBlockedAtBanner', () => {
+  const BANNER = "You've hit your session limit · resets 12:50am (Asia/Jakarta)";
+  const INPUT_PROMPT = '> ';
+  const NORMAL_LINES = Array.from({ length: 20 }, (_, i) => `normal log line ${i + 1}`);
+
+  test('true: banner near bottom + input prompt at very bottom', () => {
+    const text = [...NORMAL_LINES, BANNER, INPUT_PROMPT].join('\n');
+    assert.equal(isBlockedAtBanner(text), true);
+  });
+
+  test('true: banner is last non-empty line', () => {
+    const text = [...NORMAL_LINES, BANNER, '', ''].join('\n');
+    assert.equal(isBlockedAtBanner(text), true);
+  });
+
+  test('false: banner at top, bottom filled with normal output (bottom-anchor test)', () => {
+    // Banner on line 1, then 20 lines of normal text — banner NOT in bottom window
+    const text = [BANNER, ...NORMAL_LINES].join('\n');
+    assert.equal(isBlockedAtBanner(text), false);
+  });
+
+  test('false: purely incidental text anywhere', () => {
+    const text = [
+      'we discussed the rate limit and reset logic',
+      ...NORMAL_LINES,
+      '| Rate limit | API gate |',
+    ].join('\n');
+    assert.equal(isBlockedAtBanner(text), false);
+  });
+
+  test('false: empty string', () => {
+    assert.equal(isBlockedAtBanner(''), false);
+  });
+
+  test('custom bottomLines: banner just outside window -> false', () => {
+    // 3-line window; banner is 5 non-empty lines from bottom
+    const lines = [BANNER, 'a', 'b', 'c', 'd', 'e'];
+    assert.equal(isBlockedAtBanner(lines.join('\n'), 3), false);
+  });
+
+  test('custom bottomLines: banner just inside window -> true', () => {
+    const lines = [BANNER, 'a', 'b'];
+    assert.equal(isBlockedAtBanner(lines.join('\n'), 3), true);
+  });
 });

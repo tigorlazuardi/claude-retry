@@ -1,4 +1,4 @@
-import { match } from './patterns.ts';
+import { match, isBlockedAtBanner } from './patterns.ts';
 import { parseResetTime, calculateWaitMs } from './time-parser.ts';
 import type { PaneTarget } from './zellij.ts';
 import type { AccountSnapshot } from './accounts.ts';
@@ -142,7 +142,13 @@ async function stepState(
 
       if (accountDir !== null && usage !== undefined) {
         if (!usage.limited) {
-          // Staleness gate: account is not limited → banner is stale → ignore
+          // Account cleared. Either truly stale/incidental, OR a pane parked at a
+          // limit banner whose quota just reset (restart-after-reset / reopened-idle).
+          if (isBlockedAtBanner(screenText)) {
+            await injectContinue();
+            logger(`${label} cleared-limit banner at bottom — injected continue`);
+            return 'retried';
+          }
           logger(`${label} stale banner ignored (account not limited)`);
           return 'monitoring';
         }
@@ -165,6 +171,16 @@ async function stepState(
     const resetLine = result.resetLine ?? '';
     const parsed = parseResetTime(resetLine);
     const waitMs = calculateWaitMs(parsed, marginSeconds, fallbackHours, new Date(now));
+    if (waitMs <= 0) {
+      // Reset time already passed → limit is over (no roll-to-tomorrow).
+      if (isBlockedAtBanner(screenText)) {
+        await injectContinue();
+        logger(`${label} reset already passed — injected continue`);
+        return 'retried';
+      }
+      logger(`${label} stale banner ignored (reset already passed)`);
+      return 'monitoring';
+    }
     state.waitUntil = now + waitMs;
     state.status = 'waiting';
     return 'rate-limited';

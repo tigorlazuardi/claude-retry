@@ -98,7 +98,7 @@ describe('calculateWaitMs', () => {
     );
   });
 
-  it('invalid timezone → fallback ms', () => {
+  it('invalid timezone → falls back to UTC calc (future time still positive)', () => {
     const parsed = {
       hour: 15,
       minute: 0,
@@ -106,8 +106,81 @@ describe('calculateWaitMs', () => {
       ambiguous: false,
     };
     const result = calculateWaitMs(parsed, 60, 5, fixedNow);
-    // Falls back to UTC calculation or fallback — either way should not throw
-    // and should be a positive number
+    // Invalid tz falls back to UTC; 15:00 UTC is future from 10:00 UTC → positive
     assert.ok(result > 0, `expected positive ms, got ${result}`);
+  });
+
+  // --- past absolute time: already reset ---
+
+  it('past absolute UTC: resets 12:30, now=13:43 → non-positive (already reset)', () => {
+    // now = 2024-01-15T13:43:00Z, reset was at 12:30 UTC (73 min ago)
+    const pastNow = new Date('2024-01-15T13:43:00Z');
+    const parsed = {
+      hour: 12,
+      minute: 30,
+      timezone: 'UTC',
+      ambiguous: false,
+    };
+    const result = calculateWaitMs(parsed, 60, 5, pastNow);
+    assert.ok(result <= 0, `expected <= 0 (already reset), got ${result}`);
+    // Should be approximately -(73 min in ms) = -4380000
+    const expectedDelta = new Date('2024-01-15T12:30:00Z').getTime() - pastNow.getTime();
+    assert.equal(result, expectedDelta);
+  });
+
+  it('future absolute UTC: resets 15:00, now=14:00 → ~1h + margin positive', () => {
+    const futureNow = new Date('2024-01-15T14:00:00Z');
+    const parsed = {
+      hour: 15,
+      minute: 0,
+      timezone: 'UTC',
+      ambiguous: false,
+    };
+    const result = calculateWaitMs(parsed, 60, 5, futureNow);
+    const expected = 3600000 + 60000; // 1h + 60s margin
+    assert.equal(result, expected);
+  });
+
+  it('ambiguous: both interpretations past → non-positive (most recent reset)', () => {
+    // now = 2024-01-15T23:00:00Z
+    // "resets 10" → am=10:00 (13h ago), pm=22:00 (1h ago)
+    // both past; pm (22:00) is more recent → least-negative wins
+    const lateNow = new Date('2024-01-15T23:00:00Z');
+    const parsed = {
+      hour: 10,
+      minute: 0,
+      timezone: 'UTC',
+      ambiguous: true,
+    };
+    const result = calculateWaitMs(parsed, 60, 5, lateNow);
+    assert.ok(result <= 0, `expected <= 0, got ${result}`);
+    // pm interpretation: 22:00, delta = 22:00 - 23:00 = -3600000
+    assert.equal(result, -3600000);
+  });
+
+  it('relative 2h wait → positive ~2h + margin', () => {
+    const parsed = { relative: true as const, waitMs: 7200000 };
+    const result = calculateWaitMs(parsed, 60, 5, fixedNow);
+    assert.equal(result, 7200000 + 60000);
+  });
+
+  it('null parsed → fallbackMs positive', () => {
+    const result = calculateWaitMs(null, 60, 5, fixedNow);
+    assert.ok(result > 0, `expected positive fallback, got ${result}`);
+    assert.equal(result, 5 * 3600000 + 60000);
+  });
+
+  it('past absolute with tz: Eastern reset at 08:00, now=14:00 UTC (9am Eastern) → non-positive', () => {
+    // fixedNow = 2024-01-15T14:00:00Z = 9:00am Eastern (UTC-5 in Jan)
+    // reset was at 8:00 Eastern = 13:00 UTC (1h ago)
+    const tzNow = new Date('2024-01-15T14:00:00Z');
+    const parsed = {
+      hour: 8,
+      minute: 0,
+      timezone: 'America/New_York',
+      ambiguous: false,
+    };
+    const result = calculateWaitMs(parsed, 60, 5, tzNow);
+    assert.ok(result <= 0, `expected <= 0 (already reset), got ${result}`);
   });
 });

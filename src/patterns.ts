@@ -60,3 +60,42 @@ export function match(text: string): MatchResult {
 
   return { limited: false, resetLine: null };
 }
+
+// Canonical Claude rate-limit banner phrasings — specific enough not to fire on
+// normal code/output. Used for high-confidence detection.
+const STRICT_PATTERNS: RegExp[] = [
+  /you(?:'ve|'ve|'ve|\s+have)\s+hit\s+your\s+(?:usage|session)\s+limit/i,
+  /\d+-hour\s+limit\s+reached/i,
+  /usage\s+limit\s+reached/i,
+  /session\s+limit\b.*\bresets/i,
+  /upgrade\s+to\s+increase\s+your\s+usage\s+limit/i,
+];
+
+export function strictMatch(text: string): boolean {
+  const stripped = stripAnsi(text);
+  return STRICT_PATTERNS.some((p) => p.test(stripped));
+}
+
+// True when a canonical banner sits in the bottom region of the screen — i.e.
+// claude is parked at the limit message right above its input box, not merely
+// displaying banner text somewhere in scrollback/discussion.
+export function isBlockedAtBanner(text: string, bottomLines = 15): boolean {
+  const stripped = stripAnsi(text);
+  const lines = stripped.split('\n');
+
+  // Trim trailing blank lines
+  let end = lines.length - 1;
+  while (end >= 0 && lines[end].trim() === '') {
+    end--;
+  }
+
+  // Collect last `bottomLines` non-empty lines
+  const nonEmpty: string[] = [];
+  for (let i = end; i >= 0 && nonEmpty.length < bottomLines; i--) {
+    if (lines[i].trim() !== '') {
+      nonEmpty.unshift(lines[i]);
+    }
+  }
+
+  return strictMatch(nonEmpty.join('\n'));
+}

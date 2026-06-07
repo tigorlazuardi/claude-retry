@@ -721,3 +721,115 @@ describe('multiTick — miss-counter prune', () => {
     assert.equal(states.get('projA:1')!.missCount, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Change 3: aggressive + bottom guard — monitoring branch inject on cleared-limit banner
+// ---------------------------------------------------------------------------
+
+// Canonical banner at the bottom of the screen (as claude parks it)
+const CANONICAL_BOTTOM_SCREEN =
+  'Some output line\nAnother line\n' +
+  "You've hit your session limit · resets 12:50am (Asia/Jakarta)";
+
+// Banner text well above bottom — 20 non-empty lines of output follow it, pushing
+// it outside the bottom-15 window that isBlockedAtBanner inspects.
+const BANNER_MID_SCREEN =
+  "You've hit your session limit · resets 12:50am (Asia/Jakarta)\n" +
+  Array.from({ length: 20 }, (_, i) => `output line ${i + 1}`).join('\n');
+
+describe('multiTick — monitoring branch: fresh-pane aggressive inject', () => {
+  it('monitoring: banner + account NOT limited + isBlockedAtBanner true → injectContinue called once, returns retried', async () => {
+    const states: PaneStates = new Map();
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: false, resetsAtMs: null }]]);
+    const base = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': CANONICAL_BOTTOM_SCREEN },
+      now: () => FIXED_NOW,
+    });
+    const deps: MultiMonitorDeps = {
+      ...base,
+      getAccountSnapshot: async () => snapshot,
+      resolvePaneAccount: async (_t, _s) => ACCOUNT_DIR,
+    };
+    await multiTick(states, deps);
+    assert.equal(base.injected.length, 1, 'must inject continue when canonical banner at bottom and account cleared');
+    assert.deepEqual(base.injected[0], ['projA:1', 'continue']);
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+  });
+
+  it('monitoring: banner + account NOT limited + banner NOT at bottom → NO inject, returns monitoring (staleness gate)', async () => {
+    const states: PaneStates = new Map();
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: false, resetsAtMs: null }]]);
+    const base = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': BANNER_MID_SCREEN },
+      now: () => FIXED_NOW,
+    });
+    const deps: MultiMonitorDeps = {
+      ...base,
+      getAccountSnapshot: async () => snapshot,
+      resolvePaneAccount: async (_t, _s) => ACCOUNT_DIR,
+    };
+    await multiTick(states, deps);
+    assert.equal(base.injected.length, 0, 'must NOT inject when banner is not at bottom');
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+  });
+
+  // Tier-3 (no snapshot / text path): past-reset + isBlockedAtBanner
+  // Use a banner with a past "resets HH:MM" and pass deps.now so calculateWaitMs <= 0.
+  // FIXED_NOW = 2024-01-15T10:00:00Z. Banner says "resets 3am (UTC)" → 03:00 UTC already passed.
+  const PAST_RESET_SCREEN =
+    'Some prior output\n' +
+    "You've hit your session limit · resets 3am (UTC)";
+
+  it('monitoring: no snapshot, text reset already passed, isBlockedAtBanner true → inject, retried', async () => {
+    const states: PaneStates = new Map();
+    // FIXED_NOW = 10:00 UTC. "resets 3am (UTC)" → 03:00 already past → waitMs <= 0
+    const deps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': PAST_RESET_SCREEN },
+      now: () => FIXED_NOW,
+    });
+    await multiTick(states, deps);
+    assert.equal(deps.injected.length, 1, 'must inject when reset already passed and canonical banner at bottom');
+    assert.deepEqual(deps.injected[0], ['projA:1', 'continue']);
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+  });
+
+  it('monitoring: no snapshot, past reset, banner NOT at bottom → ignore, monitoring', async () => {
+    const states: PaneStates = new Map();
+    // Banner well above bottom — 20 non-empty lines follow, pushing it outside bottom-15 window
+    const pastResetMidScreen =
+      "You've hit your session limit · resets 3am (UTC)\n" +
+      Array.from({ length: 20 }, (_, i) => `output line ${i + 1}`).join('\n');
+    const deps = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': pastResetMidScreen },
+      now: () => FIXED_NOW,
+    });
+    await multiTick(states, deps);
+    assert.equal(deps.injected.length, 0, 'must NOT inject when banner not at bottom');
+    assert.equal(states.get('projA:1')!.status, 'monitoring');
+  });
+
+  it('regression: monitoring banner + account limited (resetsAtMs future) → still enters waiting (unchanged)', async () => {
+    const states: PaneStates = new Map();
+    const futureReset = FIXED_NOW + 3_600_000; // 1h future
+    const snapshot = makeSnapshot([[ACCOUNT_DIR, { limited: true, resetsAtMs: futureReset }]]);
+    const marginSeconds = 60;
+    const base = makeMultiDeps({
+      targets: [tgt('projA:1')],
+      screens: { 'projA:1': CANONICAL_BOTTOM_SCREEN },
+      now: () => FIXED_NOW,
+    });
+    const deps: MultiMonitorDeps = {
+      ...base,
+      getAccountSnapshot: async () => snapshot,
+      resolvePaneAccount: async (_t, _s) => ACCOUNT_DIR,
+    };
+    await multiTick(states, deps, marginSeconds);
+    assert.equal(states.get('projA:1')!.status, 'waiting', 'limited account must still enter waiting');
+    assert.equal(states.get('projA:1')!.waitUntil, futureReset + marginSeconds * 1000);
+    assert.equal(base.injected.length, 0, 'must NOT inject when account still limited');
+  });
+});

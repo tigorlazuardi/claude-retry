@@ -140,16 +140,8 @@ export function calculateWaitMs(
       }
 
       if (candidateUtcMs <= nowMs) {
-        // Tomorrow rollover — advance local midnight by one day
-        candidateLocalMs += 86400000;
-        candidateUtcMs = candidateLocalMs + tzOffset;
-        for (let i = 0; i < 3; i++) {
-          const candidateDate = new Date(candidateUtcMs);
-          const candidateTzOffset = getOffsetMs(timezone, candidateDate);
-          const corrected = candidateLocalMs + candidateTzOffset;
-          if (corrected === candidateUtcMs) break;
-          candidateUtcMs = corrected;
-        }
+        // Reset time already passed — signal "already reset" (non-positive delta)
+        return candidateUtcMs - nowMs;
       }
 
       return candidateUtcMs - nowMs + marginSeconds * 1000;
@@ -162,9 +154,10 @@ export function calculateWaitMs(
         nowDate.getUTCMonth(),
         nowDate.getUTCDate()
       );
-      let candidateMs = midnight + h * 3600000 + minute * 60000;
+      const candidateMs = midnight + h * 3600000 + minute * 60000;
       if (candidateMs <= nowMs) {
-        candidateMs += 86400000;
+        // Reset time already passed — signal "already reset" (non-positive delta)
+        return candidateMs - nowMs;
       }
       return candidateMs - nowMs + marginSeconds * 1000;
     }
@@ -178,14 +171,13 @@ export function calculateWaitMs(
     const waitAm = tryCalculate(amHour);
     const waitPm = tryCalculate(pmHour);
 
-    // Return the sooner positive wait
+    // Return the sooner positive wait; if both past, return least-negative (most recent reset)
     if (waitAm > 0 && waitPm > 0) return Math.min(waitAm, waitPm);
     if (waitAm > 0) return waitAm;
     if (waitPm > 0) return waitPm;
-    return fallbackMs;
+    // Both past: return closest-to-zero (most recent reset)
+    return Math.max(waitAm, waitPm);
   }
 
-  const wait = tryCalculate(hour);
-  if (wait <= 0) return fallbackMs;
-  return wait;
+  return tryCalculate(hour);
 }
