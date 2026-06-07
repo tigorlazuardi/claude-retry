@@ -1,6 +1,6 @@
 {
   "name": "@tigorhutasuhut/claude-retry",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Monitor Claude CLI in a zellij pane, auto-inject continue on rate-limit",
   "type": "module",
   "license": "MIT",
