@@ -11,7 +11,7 @@ export interface MonitorDeps {
   sleep: (ms: number) => Promise<void>;
 }
 
-/** Deps for watching many Claude panes across sessions. Capture/inject are
+/** Deps for watching many panes across sessions. Capture/inject are
  *  addressed by PaneTarget rather than a bare pane id. */
 export interface MultiMonitorDeps {
   listTargets: () => Promise<PaneTarget[]>;
@@ -245,9 +245,9 @@ export async function runMonitor(
 }
 
 /**
- * One discovery+monitor pass over every Claude pane in every live session.
+ * One discovery+monitor pass over every pane in every live session.
  *
- * Re-discovers targets each call so new Claude sessions/panes are picked up and
+ * Re-discovers targets each call so new sessions/panes are picked up and
  * closed ones are pruned. Per-pane state lives in `states`, keyed by the
  * target's label (session:paneId), and persists across calls. A failed
  * discovery or a single pane's capture/inject error is swallowed so one bad
@@ -292,8 +292,8 @@ export async function multiTick(
 
   log(
     targets.length === 0
-      ? 'scan: no Claude panes found'
-      : `scan: watching ${targets.length} Claude pane(s) [${targets.map((t) => t.label).join(', ')}]`,
+      ? 'scan: no panes found'
+      : `scan: watching ${targets.length} pane(s) [${targets.map((t) => t.label).join(', ')}]`,
   );
 
   // Capture each target's screen once, collecting successes into a map.
@@ -333,7 +333,7 @@ export async function multiTick(
     if (!state) {
       state = createState();
       states.set(target.label, state);
-      log(`${target.label} — new Claude pane, now watching`);
+      log(`${target.label} — new pane, now watching`);
     }
     // Reset miss counter for panes present this pass
     state.missCount = 0;

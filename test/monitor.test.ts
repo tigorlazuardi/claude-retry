@@ -203,7 +203,7 @@ describe('multiTick', () => {
     assert.equal(states.has('projA:1'), true);
   });
 
-  it('picks up a newly appeared Claude pane on a later pass', async () => {
+  it('picks up a newly appeared pane on a later pass', async () => {
     const states: PaneStates = new Map();
     let targets = [tgt('projA:1')];
     const deps = makeMultiDeps({
