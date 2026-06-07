@@ -1,6 +1,6 @@
 # claude-retry
 
-Watches every pane across **all** your [zellij](https://zellij.dev/) sessions. When a pane hits Anthropic's usage/session limit, it detects the on-screen rate-limit banner, then confirms against Anthropic's usage API — the same data the `/usage` command shows — to get the **exact** reset time and to discard stale banners. Once the reset elapses it clears the input and injects `continue` to resume automatically. One daemon covers every session at once — even detached ones.
+Watches every pane across **all** your [zellij](https://zellij.dev/) sessions. When a pane hits Anthropic's usage/session limit, it detects the on-screen rate-limit banner and cross-checks against Anthropic's usage API to get the **exact** reset time and discard stale or incidental banners. Once the reset elapses it clears the input and injects `continue` to resume automatically. One daemon covers every session at once — even detached ones.
 
 ## Install
 
@@ -55,20 +55,34 @@ source "$(npm root -g)/claude-retry/shell/wrapper.bash"
 
 ## How it works
 
-Every pass (60s for `start`, 5s for single-pane `monitor`):
+Every pass (60s for `start`):
 
-1. **Discover** — `zellij list-sessions` enumerates live sessions (EXITED ones and the daemon's own `$ZELLIJ_SESSION_NAME` are skipped). For each, `zellij --session <name> action list-panes -j` lists its panes; plugins and exited panes are dropped. New panes are added, gone ones pruned.
-2. **Capture** — each pane's visible screen is dumped with `zellij --session <name> action dump-screen --pane-id <id>` (ANSI stripped). This works on detached sessions, no attached client required.
-3. **Match** — the text is checked against the rate-limit patterns. Panes that aren't showing a limit banner are simply left alone.
-4. **Resolve** — on a banner match, the reset time is determined via a three-tier cascade:
-   - **Tier 1 — usage API (primary).** Once per pass, the daemon discovers every Claude account in use by reading `CLAUDE_CONFIG_DIR` from each Claude process via `/proc` (Linux). For each account it calls `GET https://api.anthropic.com/api/oauth/usage` with the OAuth token from `<CLAUDE_CONFIG_DIR>/.credentials.json`. If the account is **not** limited the banner is stale — it is silently ignored, no wait issued. If the account **is** limited the daemon waits until the API's exact `resets_at` timestamp. Credentials are re-read every pass, so token refreshes are picked up automatically.
-   - **Tier 2 — /proc pane→account bridge (planned).** Needed only when two or more accounts are limited simultaneously, so the daemon must map a specific pane to its account. This is a phase-2 stub; until implemented, that case falls through to tier 3.
-   - **Tier 3 — text fallback.** Used when the API is unreachable, the account is unknown, or tier 2 is unresolved. Falls back to parsing the reset time from the on-screen banner text (the original behavior). A banner is never silently ignored when the account is unknown — this ensures a real limit is never missed.
-5. **Retry** — once the resolved reset time elapses, the daemon sends **Ctrl+C** (clears any half-typed input — a single Ctrl+C in Claude Code doesn't quit), then types `continue` and Enter via `write-chars` / `write`.
+1. **Discover** — `zellij list-sessions` enumerates live sessions (EXITED ones and the daemon's own `$ZELLIJ_SESSION_NAME` are skipped). For each, `zellij --session <name> action list-panes -j` lists its panes; plugins and exited panes are dropped. New panes are added; gone panes are tracked via a miss-counter and dropped only after **3 consecutive absent passes**, so a transient `list-panes` hiccup never loses a pane mid-wait.
+2. **Capture** — each pane's visible screen is dumped with `zellij --session <name> action dump-screen --pane-id <id>` (ANSI stripped). Works on detached sessions — no attached client required.
+3. **Signal check** — the screen is checked for two signals:
+   - **Loose banner match** — any rate-limit text present anywhere on screen (candidate trigger).
+   - **Canonical banner** (`isBlockedAtBanner`) — a high-confidence match anchored to the **bottom** of the screen, meaning Claude is parked at the limit right above its input box. This distinguishes an active block from incidental banner text in scrollback.
+4. **API call (conditional)** — the usage API (`GET https://api.anthropic.com/api/oauth/usage`) is called **only** when at least one pane shows a banner or is already waiting. Zero API calls when nothing is limited. Account is resolved as: the sole account on the machine, else the sole limited account, else via the Linux `/proc` bridge (pane → pts → `CLAUDE_CONFIG_DIR`), else unknown.
+5. **State machine per pane:**
 
-Per-pane state (keyed by `session:paneId`) persists across passes, so a pane mid-wait isn't disturbed by rediscovery. It runs as a plain foreground process — no transparent session wrapping, no external daemon. The zellij pane is the daemon.
+   **MONITORING:**
+   - No banner → idle, nothing to do.
+   - Banner + account **LIMITED** → enter WAITING until `resets_at`.
+   - Banner + account **CLEARED** → if a canonical banner sits at the bottom (Claude restarted after reset, or a reopened `claude --continue` left idle) → inject `continue`; otherwise ignore (stale or scrollback text — no false triggers).
+   - Banner + account **UNKNOWN** (API down) → parse reset time from on-screen text; future → enter WAITING; already-passed → inject `continue` if canonical banner at bottom, else ignore. A bare past time means the limit already reset — it is never rolled to tomorrow.
 
-> **Multi-account note.** On Linux, account discovery reads `CLAUDE_CONFIG_DIR` from every live Claude process via `/proc`. This means the daemon polls usage for every account in use — not just the default one. On non-Linux systems it falls back to the default account (`~/.claude`) plus tier-3 text parsing.
+   **WAITING:**
+   - Banner gone → abandon (Claude exited, user continued, or pane ID reused).
+   - Account cleared **or** timer elapsed → inject `continue`.
+   - Account still limited → keep waiting; `resets_at` refreshed live each pass.
+
+6. **Inject** — Ctrl+C (clears any half-typed input; one Ctrl+C does not quit Claude Code), then `continue` + Enter via `write-chars` / `write`.
+
+Per-pane state (keyed by `session:paneId`) persists across passes. Runs as a plain foreground process — the zellij pane is the daemon.
+
+> **Single-pane `monitor <id>` mode** is text-only: no account API, just screen scraping against the current session.
+
+> **Multi-account (Linux).** Account discovery reads `CLAUDE_CONFIG_DIR` from every live Claude process via `/proc` and polls usage for each account. On non-Linux the daemon uses the default account (`~/.claude`) and falls back to on-screen time parsing when the API is unavailable.
 
 ## Requirements
 
