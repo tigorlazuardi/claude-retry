@@ -11,6 +11,7 @@ import { runMonitor, runMultiMonitor } from './monitor.ts';
 import { readAccessToken, fetchUsage } from './usage.ts';
 import { discoverAccountDirs, resolvePaneConfigDir } from './accounts.ts';
 import type { AccountSnapshot } from './accounts.ts';
+import { formatClock } from './format.ts';
 
 const USAGE = `claude-retry — Auto-inject 'continue' when Claude hits a rate limit in zellij
 
@@ -29,7 +30,7 @@ automatically; closed ones are dropped. Logs go to stderr.
 
 /** Timestamped stderr logger — chatty so the daemon shows clear signs of life. */
 function log(msg: string): void {
-  const ts = new Date().toISOString().slice(11, 19); // HH:MM:SS
+  const ts = formatClock(); // local HH:MM:SS
   process.stderr.write(`[${ts}] ${msg}\n`);
 }
 

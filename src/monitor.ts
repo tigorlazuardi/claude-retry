@@ -1,5 +1,6 @@
 import { match, isBlockedAtBanner } from './patterns.ts';
 import { parseResetTime, calculateWaitMs } from './time-parser.ts';
+import { formatLocalDateTime } from './format.ts';
 import type { PaneTarget } from './zellij.ts';
 import type { AccountSnapshot } from './accounts.ts';
 import type { AccountUsage } from './usage.ts';
@@ -125,7 +126,7 @@ async function stepState(
       await injectContinue();
       state.status = 'monitoring';
       state.waitUntil = 0;
-      logger(`${label} reset reached — injected continue`);
+      logger(`${label} — reset reached, sent 'continue'`);
       return 'retried';
     }
 
@@ -146,7 +147,7 @@ async function stepState(
           // limit banner whose quota just reset (restart-after-reset / reopened-idle).
           if (isBlockedAtBanner(screenText)) {
             await injectContinue();
-            logger(`${label} cleared-limit banner at bottom — injected continue`);
+            logger(`${label} cleared-limit banner at bottom — sent 'continue'`);
             return 'retried';
           }
           logger(`${label} stale banner ignored (account not limited)`);
@@ -157,7 +158,7 @@ async function stepState(
         if (usage.resetsAtMs !== null) {
           state.waitUntil = usage.resetsAtMs + marginMs;
           state.status = 'waiting';
-          logger(`${label} account ${accountDir} limited, reset ${new Date(usage.resetsAtMs).toISOString()}`);
+          logger(`${label} account ${accountDir} limited, 'continue' at ${formatLocalDateTime(state.waitUntil)}`);
           return 'rate-limited';
         }
         // resetsAtMs null — fall through to text parse for the time, but
@@ -175,7 +176,7 @@ async function stepState(
       // Reset time already passed → limit is over (no roll-to-tomorrow).
       if (isBlockedAtBanner(screenText)) {
         await injectContinue();
-        logger(`${label} reset already passed — injected continue`);
+        logger(`${label} reset already passed — sent 'continue'`);
         return 'retried';
       }
       logger(`${label} stale banner ignored (reset already passed)`);
@@ -356,12 +357,11 @@ function logPaneStatus(
   status: MonitorStatus,
 ): void {
   if (status === 'rate-limited' && before === 'monitoring') {
-    const until = new Date(state.waitUntil).toISOString();
-    log(`${label} — RATE LIMITED, waiting until ${until}`);
+    log(`${label} — rate limited, will send 'continue' at ${formatLocalDateTime(state.waitUntil)}`);
   } else if (status === 'rate-limited') {
-    log(`${label} — still waiting for reset`);
+    log(`${label} — waiting, 'continue' at ${formatLocalDateTime(state.waitUntil)}`);
   } else if (status === 'retried') {
-    log(`${label} — reset reached, cleared input + injected 'continue'`);
+    log(`${label} — reset reached, sent 'continue'`);
   } else {
     log(`${label} — ok`);
   }
