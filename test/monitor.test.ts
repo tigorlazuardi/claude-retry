@@ -4,6 +4,8 @@ import {
   createState,
   tick,
   multiTick,
+  runMonitor,
+  runMultiMonitor,
   type MonitorDeps,
   type MultiMonitorDeps,
   type PaneStates,
@@ -831,5 +833,54 @@ describe('multiTick — monitoring branch: fresh-pane aggressive inject', () => 
     assert.equal(states.get('projA:1')!.status, 'waiting', 'limited account must still enter waiting');
     assert.equal(states.get('projA:1')!.waitUntil, futureReset + marginSeconds * 1000);
     assert.equal(base.injected.length, 0, 'must NOT inject when account still limited');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Loop order: tick-before-sleep
+// ---------------------------------------------------------------------------
+
+describe('runMonitor — tick fires before first sleep', () => {
+  it('capture is called before sleep throws', async () => {
+    const callOrder: string[] = [];
+    const sentinel = new Error('sentinel-sleep');
+    const deps: MonitorDeps = {
+      capture: async (_paneId: string) => { callOrder.push('capture'); return ''; },
+      inject: async () => {},
+      now: () => FIXED_NOW,
+      sleep: async () => { callOrder.push('sleep'); throw sentinel; },
+    };
+    try {
+      await runMonitor('pane-1', deps);
+    } catch (e) {
+      if (e !== sentinel) throw e;
+    }
+    assert.ok(callOrder.indexOf('capture') < callOrder.indexOf('sleep'),
+      'capture must be called before sleep');
+    assert.ok(callOrder.filter(x => x === 'capture').length >= 1,
+      'capture must have been called at least once');
+  });
+});
+
+describe('runMultiMonitor — multiTick fires before first sleep', () => {
+  it('listTargets is called before sleep throws', async () => {
+    const callOrder: string[] = [];
+    const sentinel = new Error('sentinel-sleep');
+    const deps: MultiMonitorDeps = {
+      listTargets: async () => { callOrder.push('listTargets'); return []; },
+      capture: async () => '',
+      inject: async () => {},
+      now: () => FIXED_NOW,
+      sleep: async () => { callOrder.push('sleep'); throw sentinel; },
+    };
+    try {
+      await runMultiMonitor(deps);
+    } catch (e) {
+      if (e !== sentinel) throw e;
+    }
+    assert.ok(callOrder.indexOf('listTargets') < callOrder.indexOf('sleep'),
+      'listTargets must be called before sleep');
+    assert.ok(callOrder.filter(x => x === 'listTargets').length >= 1,
+      'listTargets must have been called at least once');
   });
 });

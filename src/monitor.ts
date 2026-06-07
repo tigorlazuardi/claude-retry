@@ -239,8 +239,8 @@ export async function runMonitor(
 ): Promise<void> {
   const state = createState();
   for (;;) {
-    await deps.sleep(pollIntervalMs ?? 5000);
     await tick(paneId, state, deps, marginSeconds, fallbackHours);
+    await deps.sleep(pollIntervalMs ?? 5000);
   }
 }
 
@@ -375,7 +375,7 @@ export async function runMultiMonitor(
 ): Promise<void> {
   const states: PaneStates = new Map();
   for (;;) {
-    await deps.sleep(pollIntervalMs ?? 60000);
     await multiTick(states, deps, marginSeconds, fallbackHours);
+    await deps.sleep(pollIntervalMs ?? 60000);
   }
 }
